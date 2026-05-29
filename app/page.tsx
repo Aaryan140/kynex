@@ -65,6 +65,18 @@ type WorkoutLog = {
 
 type LogEntry = MealLog | WorkoutLog;
 
+type UserProfile = {
+  displayName: string;
+  avatarUrl?: string;
+  avatarPath?: string;
+  age: number;
+  heightCm: number;
+  weightKg: number;
+  goal: string;
+  trainingLevel: string;
+  dailyCalorieTarget: number;
+};
+
 type SpeechRecognitionConstructor = new () => {
   continuous: boolean;
   interimResults: boolean;
@@ -90,6 +102,18 @@ declare global {
 
 const today = new Date().toISOString().slice(0, 10);
 const supabase = getSupabaseBrowserClient();
+
+function defaultProfile(email?: string | null): UserProfile {
+  return {
+    displayName: email?.split("@")[0] || "KYNEX athlete",
+    age: 28,
+    heightCm: 178,
+    weightKg: 78,
+    goal: "Recomposition",
+    trainingLevel: "Active",
+    dailyCalorieTarget: 2200
+  };
+}
 
 function yesterday() {
   const value = new Date();
@@ -214,6 +238,7 @@ export default function KynexApp() {
   const [logs, setLogs] = useState<LogEntry[]>(starterLogs);
   const [editing, setEditing] = useState<LogEntry | null>(null);
   const [session, setSession] = useState<Session | null>(null);
+  const [profile, setProfile] = useState<UserProfile>(() => defaultProfile());
   const [authReady, setAuthReady] = useState(!supabase);
   const [syncStatus, setSyncStatus] = useState(
     supabase ? "Connect Supabase to sync logs." : "Demo mode: add Supabase keys to enable cloud sync."
@@ -242,10 +267,81 @@ export default function KynexApp() {
   useEffect(() => {
     if (!supabase || !user) {
       setLogs(starterLogs);
+      setProfile(defaultProfile());
       return;
     }
     void loadCloudLogs(user.id);
+    void loadCloudProfile(user.id, user.email);
   }, [user?.id]);
+
+  async function loadCloudProfile(userId: string, email?: string | null) {
+    if (!supabase) return;
+    const fallback = defaultProfile(email);
+    const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
+    if (error) {
+      setSyncStatus(error.message);
+      setProfile(fallback);
+      return;
+    }
+    const row = data ?? {};
+    let avatarUrl: string | undefined;
+    if (row.avatar_url) {
+      const { data: signed } = await supabase.storage.from("avatars").createSignedUrl(row.avatar_url, 60 * 60);
+      avatarUrl = signed?.signedUrl;
+    }
+    const nextProfile: UserProfile = {
+      displayName: row.display_name || fallback.displayName,
+      avatarUrl,
+      avatarPath: row.avatar_url ?? undefined,
+      age: Number(row.age ?? fallback.age),
+      heightCm: Number(row.height_cm ?? fallback.heightCm),
+      weightKg: Number(row.weight_kg ?? fallback.weightKg),
+      goal: row.goal || fallback.goal,
+      trainingLevel: row.training_level || fallback.trainingLevel,
+      dailyCalorieTarget: Number(row.daily_calorie_target ?? fallback.dailyCalorieTarget)
+    };
+    setProfile(nextProfile);
+    if (!data) await saveProfile(nextProfile, undefined, false);
+  }
+
+  async function uploadAvatar(file: File) {
+    if (!supabase || !user) return undefined;
+    const extension = file.name.split(".").pop() || "jpg";
+    const avatarPath = `${user.id}/${Date.now()}-${makeId("avatar")}.${extension}`;
+    const { error } = await supabase.storage.from("avatars").upload(avatarPath, file, { upsert: false });
+    if (error) throw error;
+    return avatarPath;
+  }
+
+  async function saveProfile(nextProfile: UserProfile, avatarFile?: File, showStatus = true) {
+    if (!supabase || !user) {
+      setProfile(nextProfile);
+      return;
+    }
+    if (showStatus) setSyncStatus("Saving profile...");
+    let avatarPath = nextProfile.avatarPath;
+    if (avatarFile) avatarPath = await uploadAvatar(avatarFile);
+    const { error } = await supabase.from("profiles").upsert({
+      id: user.id,
+      display_name: nextProfile.displayName,
+      avatar_url: avatarPath ?? null,
+      age: nextProfile.age || null,
+      height_cm: nextProfile.heightCm || null,
+      weight_kg: nextProfile.weightKg || null,
+      goal: nextProfile.goal,
+      training_level: nextProfile.trainingLevel,
+      daily_calorie_target: nextProfile.dailyCalorieTarget || 2200,
+      updated_at: new Date().toISOString()
+    });
+    if (error) { setSyncStatus(error.message); return; }
+    let avatarUrl = nextProfile.avatarUrl;
+    if (avatarPath && supabase) {
+      const { data } = await supabase.storage.from("avatars").createSignedUrl(avatarPath, 60 * 60);
+      avatarUrl = data?.signedUrl ?? avatarUrl;
+    }
+    setProfile({ ...nextProfile, avatarPath, avatarUrl });
+    if (showStatus) setSyncStatus("Profile saved.");
+  }
 
   async function loadCloudLogs(userId: string) {
     if (!supabase) return;
@@ -399,17 +495,17 @@ export default function KynexApp() {
         <Header tab={tab} userEmail={user?.email ?? null} syncStatus={syncStatus} />
         <div className="screen-content">
           {supabase && !user ? <AuthScreen /> : <>
-            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} score={score} logs={todaysLogs} onEdit={setEditing} onTab={setTab} />}
-            {tab === "food" && <FoodScreen onSave={saveLog} />}
-            {tab === "workout" && <WorkoutScreen onSave={saveLog} />}
+            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} score={score} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
+            {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
+            {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
             {tab === "history" && <HistoryScreen logs={logs} onEdit={setEditing} />}
-            {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} />}
+            {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} profile={profile} onSave={saveProfile} />}
           </>}
         </div>
         {(!supabase || user) && <BottomNav active={tab} onChange={setTab} />}
       </section>
       <aside className="desktop-panel">
-        <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now runs through server routes, and Supabase sync turns on automatically once your project keys are in .env.local.</p></div>
+        <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now uses your profile for better calorie and effort estimates while Supabase keeps logs and avatar data private.</p></div>
         <div className="desktop-grid"><Metric label="Calories in" value={caloriesIn.toLocaleString()} tone="green" /><Metric label="Burned" value={caloriesOut.toLocaleString()} tone="gold" /><Metric label="Protein" value={`${protein}g`} tone="green" /><Metric label="Readiness" value={`${score.toFixed(1)}`} tone="gold" /></div>
       </aside>
       {editing && <EditSheet entry={editing} onClose={() => setEditing(null)} onSave={updateLog} onDelete={deleteLog} />}
@@ -464,10 +560,10 @@ function AuthScreen() {
   );
 }
 
-function HomeScreen({ caloriesIn, caloriesOut, protein, score, logs, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; score: number; logs: LogEntry[]; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
+function HomeScreen({ caloriesIn, caloriesOut, protein, score, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; score: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
   return (
     <div className="stack">
-      <section className="hero-card"><p className="eyebrow">Remaining deficit target</p><div className="hero-stat"><span>{Math.max(0, 2200 - caloriesIn + caloriesOut).toLocaleString()}</span><small>kcal</small></div><div className="split-stats"><span><b>{caloriesIn.toLocaleString()}</b>eaten</span><span><b>{caloriesOut.toLocaleString()}</b>burned</span></div></section>
+      <section className="hero-card"><p className="eyebrow">Remaining {profile.goal.toLowerCase()} target</p><div className="hero-stat"><span>{Math.max(0, profile.dailyCalorieTarget - caloriesIn + caloriesOut).toLocaleString()}</span><small>kcal</small></div><div className="split-stats"><span><b>{caloriesIn.toLocaleString()}</b>eaten</span><span><b>{caloriesOut.toLocaleString()}</b>burned</span></div></section>
       <section><div className="section-title"><h3>Daily Macros</h3><Activity size={16} /></div><div className="macro-grid"><Ring label="Protein" value={protein} max={180} /><Ring label="Carbs" value={105} max={240} /><Ring label="Fat" value={46} max={80} /></div></section>
       <section className="score-card"><p className="eyebrow">Health Score</p><strong>{score.toFixed(1)}</strong><span>out of 10 based on today's meal and effort balance</span></section>
       <section><div className="section-title"><h3>Today's Logs</h3><button type="button" onClick={() => onTab("history")}>View all</button></div><div className="log-list">{logs.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>
@@ -476,7 +572,7 @@ function HomeScreen({ caloriesIn, caloriesOut, protein, score, logs, onEdit, onT
   );
 }
 
-function FoodScreen({ onSave }: { onSave: (entry: LogEntry) => void }) {
+function FoodScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry: LogEntry) => void }) {
   const [input, setInput] = useState("");
   const [imageUrl, setImageUrl] = useState<string | undefined>();
   const [imageFile, setImageFile] = useState<File | undefined>();
@@ -497,7 +593,7 @@ function FoodScreen({ onSave }: { onSave: (entry: LogEntry) => void }) {
     setAnalyzing(true);
     let imageDataUrl = "";
     if (imageFile) imageDataUrl = await fileToDataUrl(imageFile);
-    const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl }) });
+    const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
@@ -514,7 +610,7 @@ function FoodScreen({ onSave }: { onSave: (entry: LogEntry) => void }) {
   );
 }
 
-function WorkoutScreen({ onSave }: { onSave: (entry: LogEntry) => void }) {
+function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry: LogEntry) => void }) {
   const [input, setInput] = useState("");
   const [draft, setDraft] = useState<WorkoutLog | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -523,7 +619,7 @@ function WorkoutScreen({ onSave }: { onSave: (entry: LogEntry) => void }) {
 
   async function analyze() {
     setAnalyzing(true);
-    const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: 78 }) });
+    const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
@@ -542,11 +638,40 @@ function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: Log
   return <div className="stack">{Object.entries(grouped).map(([date, entries]) => <section key={date} className="history-day"><div className="section-title"><h3>{date === today ? "Today" : date}</h3><span>{entries.length} logs</span></div><div className="log-list">{entries.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>)}</div>;
 }
 
-function ProfileScreen({ session, syncStatus }: { session: Session | null; syncStatus: string }) {
+function ProfileScreen({ session, syncStatus, profile, onSave }: { session: Session | null; syncStatus: string; profile: UserProfile; onSave: (profile: UserProfile, avatarFile?: File) => Promise<void> | void }) {
+  const [draft, setDraft] = useState(profile);
+  const [avatarFile, setAvatarFile] = useState<File | undefined>();
+  const [avatarPreview, setAvatarPreview] = useState<string | undefined>(profile.avatarUrl);
+  const [saving, setSaving] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setDraft(profile);
+    setAvatarPreview(profile.avatarUrl);
+    setAvatarFile(undefined);
+  }, [profile]);
+
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
   }
-  return <div className="stack"><section className="profile-card"><div className="avatar">{session?.user.email?.slice(0, 1).toUpperCase() ?? "A"}</div><div><h3>{session?.user.email ?? "Demo athlete"}</h3><p>{syncStatus}</p><span className="status-chip">{session ? "Cloud linked" : "Demo mode"}</span></div></section><section className="score-card profile-score"><p className="eyebrow">Strength score</p><strong>94.2</strong><span>top 3% of daily users this week</span></section><section className="profile-list"><ProfileRow icon={<User size={16} />} label="Personal information" value="Age, height, weight, goal" /><ProfileRow icon={<Activity size={16} />} label="Training intensity" value="Current level: elite" /><ProfileRow icon={<ShieldCheck size={16} />} label="Security" value="Email/password and Google auth" /></section>{session && <button type="button" className="secondary-button full" onClick={signOut}><LogOut size={17} /> Sign out</button>}</div>;
+
+  function onAvatar(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setAvatarFile(file);
+    setAvatarPreview(URL.createObjectURL(file));
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    await onSave({ ...draft, avatarUrl: avatarPreview, avatarPath: profile.avatarPath }, avatarFile);
+    setSaving(false);
+  }
+
+  const initials = (draft.displayName || session?.user.email || "A").slice(0, 1).toUpperCase();
+
+  return <form className="stack" onSubmit={submit}><section className="profile-card editable-profile"><button type="button" className="avatar avatar-button" onClick={() => avatarInputRef.current?.click()} aria-label="Upload profile picture">{avatarPreview ? <img src={avatarPreview} alt="Profile" /> : initials}<span><ImagePlus size={14} /> Edit</span></button><input ref={avatarInputRef} className="hidden-input" type="file" accept="image/*" onChange={onAvatar} /><div><h3>{draft.displayName || session?.user.email || "Demo athlete"}</h3><p>{session?.user.email ?? syncStatus}</p><span className="status-chip">{session ? "Cloud linked" : "Demo mode"}</span></div></section><section className="score-card profile-score"><p className="eyebrow">Personalization score</p><strong>{Math.min(10, Math.round(((draft.age ? 2 : 0) + (draft.heightCm ? 2 : 0) + (draft.weightKg ? 2 : 0) + (draft.goal ? 2 : 0) + (draft.trainingLevel ? 2 : 0)) * 10) / 10).toFixed(1)}</strong><span>out of 10 based on complete body and goal data</span></section><section className="profile-form"><div className="section-title"><h3>Personal information</h3><User size={16} /></div><EditableText label="Display name" value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /><div className="nutrition-grid"><NumberField label="Age" value={draft.age} onChange={(age) => setDraft({ ...draft, age })} /><NumberField label="Height cm" value={draft.heightCm} onChange={(heightCm) => setDraft({ ...draft, heightCm })} /><NumberField label="Weight kg" value={draft.weightKg} step={0.1} onChange={(weightKg) => setDraft({ ...draft, weightKg })} /><NumberField label="Daily kcal" value={draft.dailyCalorieTarget} onChange={(dailyCalorieTarget) => setDraft({ ...draft, dailyCalorieTarget })} /></div><EditableText label="Goal" value={draft.goal} onChange={(goal) => setDraft({ ...draft, goal })} /></section><section className="profile-form"><div className="section-title"><h3>Training intensity</h3><Activity size={16} /></div><EditableText label="Current level" value={draft.trainingLevel} onChange={(trainingLevel) => setDraft({ ...draft, trainingLevel })} /><p className="support-note">AI uses weight, goal, and training level to tune calorie burn and nutrition notes.</p></section><section className="profile-list"><ProfileRow icon={<ShieldCheck size={16} />} label="Security" value="Email/password and Google auth managed by Supabase" /></section><button type="submit" className="primary-button full" disabled={saving}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}{saving ? "Saving profile" : "Save profile"}</button>{session && <button type="button" className="secondary-button full" onClick={signOut}><LogOut size={17} /> Sign out</button>}</form>;
 }
 
 function ReviewMeal({ draft, provider, onChange, onSave }: { draft: MealLog; provider: string; onChange: (value: MealLog) => void; onSave: () => void }) {

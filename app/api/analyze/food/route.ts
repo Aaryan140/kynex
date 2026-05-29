@@ -34,7 +34,7 @@ function parseJson(text: string): FoodAnalysis {
 }
 
 export async function POST(request: NextRequest) {
-  const { prompt = "", imageDataUrl = "" } = await request.json();
+  const { prompt = "", imageDataUrl = "", profile = {} } = await request.json();
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -45,7 +45,16 @@ export async function POST(request: NextRequest) {
     {
       text:
         "Analyze this food log. Return only JSON with title, calories, protein, carbs, fat, score, confidence, notes. Score is 0-10 for overall nutrition quality. confidence is 0-1. Be conservative and mention uncertainty in notes. User text: " +
-        prompt
+        prompt +
+        ". User profile context for personalization: " +
+        JSON.stringify({
+          age: profile.age,
+          heightCm: profile.heightCm,
+          weightKg: profile.weightKg,
+          goal: profile.goal,
+          trainingLevel: profile.trainingLevel,
+          dailyCalorieTarget: profile.dailyCalorieTarget
+        })
     }
   ];
 

@@ -32,7 +32,7 @@ function parseJson(text: string): WorkoutAnalysis {
 }
 
 export async function POST(request: NextRequest) {
-  const { prompt = "", bodyWeightKg = 78 } = await request.json();
+  const { prompt = "", bodyWeightKg = 78, profile = {} } = await request.json();
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -51,6 +51,15 @@ export async function POST(request: NextRequest) {
               text:
                 "Analyze this workout log for a fitness tracker. Return only JSON with title, duration, calories, effort, score, movements, notes. Score is 0-10 for workout quality and recovery impact. Use body weight kg for calorie estimate when useful: " +
                 bodyWeightKg +
+                ". User profile context for personalization: " +
+                JSON.stringify({
+                  age: profile.age,
+                  heightCm: profile.heightCm,
+                  weightKg: profile.weightKg,
+                  goal: profile.goal,
+                  trainingLevel: profile.trainingLevel,
+                  dailyCalorieTarget: profile.dailyCalorieTarget
+                }) +
                 ". Workout text: " +
                 prompt
             }

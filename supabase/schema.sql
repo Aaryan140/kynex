@@ -4,9 +4,11 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text,
   avatar_url text,
+  age integer,
   height_cm numeric,
   weight_kg numeric,
   goal text default 'maintain',
+  training_level text default 'active',
   daily_calorie_target integer default 2200,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -167,5 +169,45 @@ create policy "Food image owner delete"
   to authenticated
   using (
     bucket_id = 'food-images'
+    and (storage.foldername(name))[1] = (select auth.uid())::text
+  );
+
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', false)
+on conflict (id) do nothing;
+
+create policy "Avatar owner read"
+  on storage.objects for select
+  to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = (select auth.uid())::text
+  );
+
+create policy "Avatar owner insert"
+  on storage.objects for insert
+  to authenticated
+  with check (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = (select auth.uid())::text
+  );
+
+create policy "Avatar owner update"
+  on storage.objects for update
+  to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = (select auth.uid())::text
+  )
+  with check (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = (select auth.uid())::text
+  );
+
+create policy "Avatar owner delete"
+  on storage.objects for delete
+  to authenticated
+  using (
+    bucket_id = 'avatars'
     and (storage.foldername(name))[1] = (select auth.uid())::text
   );
