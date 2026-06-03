@@ -149,6 +149,7 @@ button {
 .review-card,
 .profile-card,
 .profile-form,
+.target-card,
 .profile-list,
 .history-day {
   border: 1px solid var(--line);
@@ -423,6 +424,7 @@ button {
 .review-card,
 .profile-card,
 .profile-form,
+.target-card,
 .profile-list,
 .history-day {
   padding: 16px;
@@ -482,7 +484,8 @@ button {
 }
 
 .input-card textarea,
-.field input {
+.field input,
+.field select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -499,7 +502,8 @@ button {
 }
 
 .input-card textarea:focus,
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--green);
 }
 
@@ -549,6 +553,12 @@ button {
 .field input {
   height: 44px;
   padding: 0 12px;
+}
+
+.field select {
+  height: 44px;
+  padding: 0 12px;
+  appearance: none;
 }
 
 .profile-card {
@@ -636,6 +646,47 @@ button {
   border: 1px solid var(--line);
   border-radius: 20px;
   background: linear-gradient(145deg, #151515, #111);
+}
+
+.target-card {
+  display: grid;
+  gap: 12px;
+}
+
+.target-main strong {
+  display: block;
+  color: var(--green);
+  font-size: 42px;
+  line-height: 0.95;
+}
+
+.target-main span {
+  color: var(--muted);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.target-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.target-grid span {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e0e0e;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.target-grid b {
+  color: var(--text);
+  font-size: 16px;
 }
 
 .profile-row {

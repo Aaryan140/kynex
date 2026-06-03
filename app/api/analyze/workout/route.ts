@@ -54,11 +54,16 @@ export async function POST(request: NextRequest) {
                 ". User profile context for personalization: " +
                 JSON.stringify({
                   age: profile.age,
+                  sex: profile.sex,
                   heightCm: profile.heightCm,
                   weightKg: profile.weightKg,
                   goal: profile.goal,
                   trainingLevel: profile.trainingLevel,
-                  dailyCalorieTarget: profile.dailyCalorieTarget
+                  activityLevel: profile.activityLevel,
+                  dailyCalorieTarget: profile.dailyCalorieTarget,
+                  proteinTarget: profile.proteinTarget,
+                  carbsTarget: profile.carbsTarget,
+                  fatTarget: profile.fatTarget
                 }) +
                 ". Workout text: " +
                 prompt

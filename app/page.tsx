@@ -70,11 +70,17 @@ type UserProfile = {
   avatarUrl?: string;
   avatarPath?: string;
   age: number;
+  sex: string;
   heightCm: number;
   weightKg: number;
   goal: string;
   trainingLevel: string;
+  activityLevel: string;
   dailyCalorieTarget: number;
+  proteinTarget: number;
+  carbsTarget: number;
+  fatTarget: number;
+  completedAt?: string;
 };
 
 type SpeechRecognitionConstructor = new () => {
@@ -104,15 +110,63 @@ const today = new Date().toISOString().slice(0, 10);
 const supabase = getSupabaseBrowserClient();
 
 function defaultProfile(email?: string | null): UserProfile {
+  const base = calculateTargets({
+    age: 0,
+    sex: "",
+    heightCm: 0,
+    weightKg: 0,
+    goal: "recomposition",
+    activityLevel: "moderate"
+  });
   return {
     displayName: email?.split("@")[0] || "KYNEX athlete",
-    age: 28,
-    heightCm: 178,
-    weightKg: 78,
-    goal: "Recomposition",
-    trainingLevel: "Active",
-    dailyCalorieTarget: 2200
+    age: 0,
+    sex: "",
+    heightCm: 0,
+    weightKg: 0,
+    goal: "recomposition",
+    trainingLevel: "intermediate",
+    activityLevel: "moderate",
+    dailyCalorieTarget: base.calories,
+    proteinTarget: base.protein,
+    carbsTarget: base.carbs,
+    fatTarget: base.fat
   };
+}
+
+function calculateTargets(profile: Pick<UserProfile, "age" | "sex" | "heightCm" | "weightKg" | "goal" | "activityLevel">) {
+  const weight = Math.max(0, Number(profile.weightKg) || 0);
+  const height = Math.max(0, Number(profile.heightCm) || 0);
+  const age = Math.max(0, Number(profile.age) || 0);
+  const sexOffset = profile.sex === "female" ? -161 : profile.sex === "male" ? 5 : -78;
+  const bmr = weight && height && age ? 10 * weight + 6.25 * height - 5 * age + sexOffset : 2200 / 1.45;
+  const activityMultipliers: Record<string, number> = { sedentary: 1.2, light: 1.375, moderate: 1.55, high: 1.725, athlete: 1.9 };
+  const goalAdjustments: Record<string, number> = { fat_loss: -450, recomposition: -150, maintain: 0, muscle_gain: 300, performance: 200 };
+  const calories = Math.max(1200, Math.round(((bmr * (activityMultipliers[profile.activityLevel] ?? 1.55)) + (goalAdjustments[profile.goal] ?? 0)) / 25) * 25);
+  const proteinPerKg = profile.goal === "muscle_gain" || profile.goal === "recomposition" ? 1.9 : profile.goal === "fat_loss" ? 2 : 1.6;
+  const protein = Math.max(60, Math.round((weight || 78) * proteinPerKg));
+  const fat = Math.max(40, Math.round(((calories * 0.27) / 9)));
+  const carbs = Math.max(80, Math.round((calories - protein * 4 - fat * 9) / 4));
+  return { calories, protein, carbs, fat };
+}
+
+function withCalculatedTargets(profile: UserProfile): UserProfile {
+  const targets = calculateTargets(profile);
+  return {
+    ...profile,
+    dailyCalorieTarget: targets.calories,
+    proteinTarget: targets.protein,
+    carbsTarget: targets.carbs,
+    fatTarget: targets.fat
+  };
+}
+
+function isProfileComplete(profile: UserProfile) {
+  return Boolean(profile.completedAt && profile.age && profile.sex && profile.heightCm && profile.weightKg && profile.goal && profile.activityLevel && profile.trainingLevel);
+}
+
+function labelFromValue(value: string) {
+  return value.split("_").map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
 }
 
 function yesterday() {
@@ -294,14 +348,19 @@ export default function KynexApp() {
       avatarUrl,
       avatarPath: row.avatar_url ?? undefined,
       age: Number(row.age ?? fallback.age),
+      sex: row.sex || fallback.sex,
       heightCm: Number(row.height_cm ?? fallback.heightCm),
       weightKg: Number(row.weight_kg ?? fallback.weightKg),
       goal: row.goal || fallback.goal,
       trainingLevel: row.training_level || fallback.trainingLevel,
-      dailyCalorieTarget: Number(row.daily_calorie_target ?? fallback.dailyCalorieTarget)
+      activityLevel: row.activity_level || fallback.activityLevel,
+      dailyCalorieTarget: Number(row.daily_calorie_target ?? fallback.dailyCalorieTarget),
+      proteinTarget: Number(row.protein_target_g ?? fallback.proteinTarget),
+      carbsTarget: Number(row.carbs_target_g ?? fallback.carbsTarget),
+      fatTarget: Number(row.fat_target_g ?? fallback.fatTarget),
+      completedAt: row.profile_completed_at ?? undefined
     };
     setProfile(nextProfile);
-    if (!data) await saveProfile(nextProfile, undefined, false);
   }
 
   async function uploadAvatar(file: File) {
@@ -314,32 +373,39 @@ export default function KynexApp() {
   }
 
   async function saveProfile(nextProfile: UserProfile, avatarFile?: File, showStatus = true) {
+    const calculatedProfile = withCalculatedTargets({ ...nextProfile, completedAt: nextProfile.completedAt ?? new Date().toISOString() });
     if (!supabase || !user) {
-      setProfile(nextProfile);
+      setProfile(calculatedProfile);
       return;
     }
     if (showStatus) setSyncStatus("Saving profile...");
-    let avatarPath = nextProfile.avatarPath;
+    let avatarPath = calculatedProfile.avatarPath;
     if (avatarFile) avatarPath = await uploadAvatar(avatarFile);
     const { error } = await supabase.from("profiles").upsert({
       id: user.id,
-      display_name: nextProfile.displayName,
+      display_name: calculatedProfile.displayName,
       avatar_url: avatarPath ?? null,
-      age: nextProfile.age || null,
-      height_cm: nextProfile.heightCm || null,
-      weight_kg: nextProfile.weightKg || null,
-      goal: nextProfile.goal,
-      training_level: nextProfile.trainingLevel,
-      daily_calorie_target: nextProfile.dailyCalorieTarget || 2200,
+      age: calculatedProfile.age || null,
+      sex: calculatedProfile.sex || null,
+      height_cm: calculatedProfile.heightCm || null,
+      weight_kg: calculatedProfile.weightKg || null,
+      goal: calculatedProfile.goal,
+      training_level: calculatedProfile.trainingLevel,
+      activity_level: calculatedProfile.activityLevel,
+      daily_calorie_target: calculatedProfile.dailyCalorieTarget || 2200,
+      protein_target_g: calculatedProfile.proteinTarget || null,
+      carbs_target_g: calculatedProfile.carbsTarget || null,
+      fat_target_g: calculatedProfile.fatTarget || null,
+      profile_completed_at: calculatedProfile.completedAt,
       updated_at: new Date().toISOString()
     });
     if (error) { setSyncStatus(error.message); return; }
-    let avatarUrl = nextProfile.avatarUrl;
+    let avatarUrl = calculatedProfile.avatarUrl;
     if (avatarPath && supabase) {
       const { data } = await supabase.storage.from("avatars").createSignedUrl(avatarPath, 60 * 60);
       avatarUrl = data?.signedUrl ?? avatarUrl;
     }
-    setProfile({ ...nextProfile, avatarPath, avatarUrl });
+    setProfile({ ...calculatedProfile, avatarPath, avatarUrl });
     if (showStatus) setSyncStatus("Profile saved.");
   }
 
@@ -485,6 +551,8 @@ export default function KynexApp() {
   const caloriesIn = meals.reduce((total, meal) => total + meal.calories, 0);
   const caloriesOut = workouts.reduce((total, workout) => total + workout.calories, 0);
   const protein = meals.reduce((total, meal) => total + meal.protein, 0);
+  const carbs = meals.reduce((total, meal) => total + meal.carbs, 0);
+  const fat = meals.reduce((total, meal) => total + meal.fat, 0);
   const score = todaysLogs.length ? todaysLogs.reduce((total, log) => total + log.score, 0) / todaysLogs.length : 0;
 
   if (!authReady) return <LoadingShell />;
@@ -494,15 +562,15 @@ export default function KynexApp() {
       <section className="phone-frame">
         <Header tab={tab} userEmail={user?.email ?? null} syncStatus={syncStatus} />
         <div className="screen-content">
-          {supabase && !user ? <AuthScreen /> : <>
-            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} score={score} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
+          {supabase && !user ? <AuthScreen /> : user && !isProfileComplete(profile) ? <ProfileSetupScreen email={user.email} profile={profile} onSave={saveProfile} /> : <>
+            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
             {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
             {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
             {tab === "history" && <HistoryScreen logs={logs} onEdit={setEditing} />}
             {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} profile={profile} onSave={saveProfile} />}
           </>}
         </div>
-        {(!supabase || user) && <BottomNav active={tab} onChange={setTab} />}
+        {(!supabase || (user && isProfileComplete(profile))) && <BottomNav active={tab} onChange={setTab} />}
       </section>
       <aside className="desktop-panel">
         <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now uses your profile for better calorie and effort estimates while Supabase keeps logs and avatar data private.</p></div>
@@ -560,11 +628,11 @@ function AuthScreen() {
   );
 }
 
-function HomeScreen({ caloriesIn, caloriesOut, protein, score, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; score: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
+function HomeScreen({ caloriesIn, caloriesOut, protein, carbs, fat, score, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; carbs: number; fat: number; score: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
   return (
     <div className="stack">
-      <section className="hero-card"><p className="eyebrow">Remaining {profile.goal.toLowerCase()} target</p><div className="hero-stat"><span>{Math.max(0, profile.dailyCalorieTarget - caloriesIn + caloriesOut).toLocaleString()}</span><small>kcal</small></div><div className="split-stats"><span><b>{caloriesIn.toLocaleString()}</b>eaten</span><span><b>{caloriesOut.toLocaleString()}</b>burned</span></div></section>
-      <section><div className="section-title"><h3>Daily Macros</h3><Activity size={16} /></div><div className="macro-grid"><Ring label="Protein" value={protein} max={180} /><Ring label="Carbs" value={105} max={240} /><Ring label="Fat" value={46} max={80} /></div></section>
+      <section className="hero-card"><p className="eyebrow">Remaining {labelFromValue(profile.goal).toLowerCase()} target</p><div className="hero-stat"><span>{Math.max(0, profile.dailyCalorieTarget - caloriesIn + caloriesOut).toLocaleString()}</span><small>kcal</small></div><div className="split-stats"><span><b>{caloriesIn.toLocaleString()}</b>eaten</span><span><b>{caloriesOut.toLocaleString()}</b>burned</span></div></section>
+      <section><div className="section-title"><h3>Daily Macros</h3><Activity size={16} /></div><div className="macro-grid"><Ring label="Protein" value={protein} max={profile.proteinTarget} /><Ring label="Carbs" value={carbs} max={profile.carbsTarget} /><Ring label="Fat" value={fat} max={profile.fatTarget} /></div></section>
       <section className="score-card"><p className="eyebrow">Health Score</p><strong>{score.toFixed(1)}</strong><span>out of 10 based on today's meal and effort balance</span></section>
       <section><div className="section-title"><h3>Today's Logs</h3><button type="button" onClick={() => onTab("history")}>View all</button></div><div className="log-list">{logs.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>
       <div className="quick-actions"><button type="button" className="primary-button" onClick={() => onTab("food")}><Plus size={17} /> Log meal</button><button type="button" className="secondary-button" onClick={() => onTab("workout")}><Dumbbell size={17} /> Workout</button></div>
@@ -638,22 +706,28 @@ function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: Log
   return <div className="stack">{Object.entries(grouped).map(([date, entries]) => <section key={date} className="history-day"><div className="section-title"><h3>{date === today ? "Today" : date}</h3><span>{entries.length} logs</span></div><div className="log-list">{entries.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>)}</div>;
 }
 
+function ProfileSetupScreen({ email, profile, onSave }: { email?: string | null; profile: UserProfile; onSave: (profile: UserProfile, avatarFile?: File) => Promise<void> | void }) {
+  return <ProfileEditor mode="setup" email={email} syncStatus="Complete once to personalize KYNEX." profile={profile} onSave={onSave} />;
+}
+
 function ProfileScreen({ session, syncStatus, profile, onSave }: { session: Session | null; syncStatus: string; profile: UserProfile; onSave: (profile: UserProfile, avatarFile?: File) => Promise<void> | void }) {
+  return <ProfileEditor mode="settings" email={session?.user.email} syncStatus={syncStatus} profile={profile} onSave={onSave} onSignOut={async () => { if (supabase) await supabase.auth.signOut(); }} />;
+}
+
+function ProfileEditor({ mode, email, syncStatus, profile, onSave, onSignOut }: { mode: "setup" | "settings"; email?: string | null; syncStatus: string; profile: UserProfile; onSave: (profile: UserProfile, avatarFile?: File) => Promise<void> | void; onSignOut?: () => Promise<void> | void }) {
   const [draft, setDraft] = useState(profile);
   const [avatarFile, setAvatarFile] = useState<File | undefined>();
   const [avatarPreview, setAvatarPreview] = useState<string | undefined>(profile.avatarUrl);
   const [saving, setSaving] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const calculated = withCalculatedTargets(draft);
+  const completionScore = Math.min(10, Math.round(((draft.age ? 2 : 0) + (draft.sex ? 2 : 0) + (draft.heightCm ? 2 : 0) + (draft.weightKg ? 2 : 0) + (draft.goal && draft.activityLevel ? 2 : 0)) * 10) / 10);
 
   useEffect(() => {
     setDraft(profile);
     setAvatarPreview(profile.avatarUrl);
     setAvatarFile(undefined);
   }, [profile]);
-
-  async function signOut() {
-    if (supabase) await supabase.auth.signOut();
-  }
 
   function onAvatar(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -665,13 +739,13 @@ function ProfileScreen({ session, syncStatus, profile, onSave }: { session: Sess
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
-    await onSave({ ...draft, avatarUrl: avatarPreview, avatarPath: profile.avatarPath }, avatarFile);
+    await onSave({ ...calculated, avatarUrl: avatarPreview, avatarPath: profile.avatarPath }, avatarFile);
     setSaving(false);
   }
 
-  const initials = (draft.displayName || session?.user.email || "A").slice(0, 1).toUpperCase();
+  const initials = (draft.displayName || email || "A").slice(0, 1).toUpperCase();
 
-  return <form className="stack" onSubmit={submit}><section className="profile-card editable-profile"><button type="button" className="avatar avatar-button" onClick={() => avatarInputRef.current?.click()} aria-label="Upload profile picture">{avatarPreview ? <img src={avatarPreview} alt="Profile" /> : initials}<span><ImagePlus size={14} /> Edit</span></button><input ref={avatarInputRef} className="hidden-input" type="file" accept="image/*" onChange={onAvatar} /><div><h3>{draft.displayName || session?.user.email || "Demo athlete"}</h3><p>{session?.user.email ?? syncStatus}</p><span className="status-chip">{session ? "Cloud linked" : "Demo mode"}</span></div></section><section className="score-card profile-score"><p className="eyebrow">Personalization score</p><strong>{Math.min(10, Math.round(((draft.age ? 2 : 0) + (draft.heightCm ? 2 : 0) + (draft.weightKg ? 2 : 0) + (draft.goal ? 2 : 0) + (draft.trainingLevel ? 2 : 0)) * 10) / 10).toFixed(1)}</strong><span>out of 10 based on complete body and goal data</span></section><section className="profile-form"><div className="section-title"><h3>Personal information</h3><User size={16} /></div><EditableText label="Display name" value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /><div className="nutrition-grid"><NumberField label="Age" value={draft.age} onChange={(age) => setDraft({ ...draft, age })} /><NumberField label="Height cm" value={draft.heightCm} onChange={(heightCm) => setDraft({ ...draft, heightCm })} /><NumberField label="Weight kg" value={draft.weightKg} step={0.1} onChange={(weightKg) => setDraft({ ...draft, weightKg })} /><NumberField label="Daily kcal" value={draft.dailyCalorieTarget} onChange={(dailyCalorieTarget) => setDraft({ ...draft, dailyCalorieTarget })} /></div><EditableText label="Goal" value={draft.goal} onChange={(goal) => setDraft({ ...draft, goal })} /></section><section className="profile-form"><div className="section-title"><h3>Training intensity</h3><Activity size={16} /></div><EditableText label="Current level" value={draft.trainingLevel} onChange={(trainingLevel) => setDraft({ ...draft, trainingLevel })} /><p className="support-note">AI uses weight, goal, and training level to tune calorie burn and nutrition notes.</p></section><section className="profile-list"><ProfileRow icon={<ShieldCheck size={16} />} label="Security" value="Email/password and Google auth managed by Supabase" /></section><button type="submit" className="primary-button full" disabled={saving}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}{saving ? "Saving profile" : "Save profile"}</button>{session && <button type="button" className="secondary-button full" onClick={signOut}><LogOut size={17} /> Sign out</button>}</form>;
+  return <form className="stack" onSubmit={submit}><section className="profile-card editable-profile"><button type="button" className="avatar avatar-button" onClick={() => avatarInputRef.current?.click()} aria-label="Upload profile picture">{avatarPreview ? <img src={avatarPreview} alt="Profile" /> : initials}<span><ImagePlus size={14} /> Edit</span></button><input ref={avatarInputRef} className="hidden-input" type="file" accept="image/*" onChange={onAvatar} /><div><p className="eyebrow">{mode === "setup" ? "Profile setup" : "KYNEX profile"}</p><h3>{mode === "setup" ? "Personalize your targets" : draft.displayName || email || "Demo athlete"}</h3><p>{email ?? syncStatus}</p><span className="status-chip">{mode === "setup" ? "Required once" : "Cloud linked"}</span></div></section><section className="score-card profile-score"><p className="eyebrow">Personalization score</p><strong>{completionScore.toFixed(1)}</strong><span>{mode === "setup" ? "Finish these fields once; you can edit them anytime." : "out of 10 based on complete body and goal data"}</span></section><section className="profile-form"><div className="section-title"><h3>Body details</h3><User size={16} /></div><EditableText label="Display name" value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /><div className="nutrition-grid"><NumberField label="Age" value={draft.age} onChange={(age) => setDraft({ ...draft, age })} /><SelectField label="Sex" value={draft.sex} options={[["", "Choose"], ["male", "Male"], ["female", "Female"], ["other", "Other"]]} onChange={(sex) => setDraft({ ...draft, sex })} /><NumberField label="Height cm" value={draft.heightCm} onChange={(heightCm) => setDraft({ ...draft, heightCm })} /><NumberField label="Weight kg" value={draft.weightKg} step={0.1} onChange={(weightKg) => setDraft({ ...draft, weightKg })} /></div></section><section className="profile-form"><div className="section-title"><h3>Goal and activity</h3><Activity size={16} /></div><SelectField label="Goal" value={draft.goal} options={[["fat_loss", "Fat loss"], ["recomposition", "Recomposition"], ["maintain", "Maintain"], ["muscle_gain", "Muscle gain"], ["performance", "Performance"]]} onChange={(goal) => setDraft({ ...draft, goal })} /><SelectField label="Daily activity" value={draft.activityLevel} options={[["sedentary", "Mostly sitting"], ["light", "Lightly active"], ["moderate", "Moderately active"], ["high", "Very active"], ["athlete", "Athlete level"]]} onChange={(activityLevel) => setDraft({ ...draft, activityLevel })} /><SelectField label="Training level" value={draft.trainingLevel} options={[["beginner", "Beginner"], ["intermediate", "Intermediate"], ["active", "Active"], ["advanced", "Advanced"], ["elite", "Elite"]]} onChange={(trainingLevel) => setDraft({ ...draft, trainingLevel })} /></section><section className="target-card"><p className="eyebrow">Auto-calculated daily targets</p><div className="target-main"><strong>{calculated.dailyCalorieTarget.toLocaleString()}</strong><span>kcal/day</span></div><div className="target-grid"><span><b>{calculated.proteinTarget}g</b>Protein</span><span><b>{calculated.carbsTarget}g</b>Carbs</span><span><b>{calculated.fatTarget}g</b>Fat</span></div><p className="support-note">Calculated from your body stats, goal, and activity level. KYNEX uses this for Home targets and AI analysis.</p></section>{mode === "settings" && <section className="profile-list"><ProfileRow icon={<ShieldCheck size={16} />} label="Security" value="Email/password and Google auth managed by Supabase" /></section>}<button type="submit" className="primary-button full" disabled={saving || completionScore < 10}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}{saving ? "Saving profile" : mode === "setup" ? "Start tracking" : "Save profile"}</button>{mode === "settings" && onSignOut && <button type="button" className="secondary-button full" onClick={onSignOut}><LogOut size={17} /> Sign out</button>}</form>;
 }
 
 function ReviewMeal({ draft, provider, onChange, onSave }: { draft: MealLog; provider: string; onChange: (value: MealLog) => void; onSave: () => void }) {
@@ -712,6 +786,10 @@ function NumberField({ label, value, onChange, step = 1 }: { label: string; valu
 
 function EditableText({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return <label className="field"><span>{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} /></label>;
+}
+
+function SelectField({ label, value, options, onChange }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
+  return <label className="field"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([optionValue, labelText]) => <option key={optionValue} value={optionValue}>{labelText}</option>)}</select></label>;
 }
 
 function ProfileRow({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {

@@ -5,11 +5,17 @@ create table if not exists public.profiles (
   display_name text,
   avatar_url text,
   age integer,
+  sex text,
   height_cm numeric,
   weight_kg numeric,
   goal text default 'maintain',
   training_level text default 'active',
+  activity_level text default 'moderate',
   daily_calorie_target integer default 2200,
+  protein_target_g integer,
+  carbs_target_g integer,
+  fat_target_g integer,
+  profile_completed_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
