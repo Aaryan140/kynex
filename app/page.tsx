@@ -7,17 +7,21 @@ import {
   Check,
   ChevronRight,
   Dumbbell,
+  Footprints,
   Home,
   ImagePlus,
   Loader2,
   LogOut,
   Mic,
   Pencil,
+  Play,
   Plus,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
   Sparkles,
+  Square,
   User,
   Utensils,
   X
@@ -167,6 +171,25 @@ function isProfileComplete(profile: UserProfile) {
 
 function labelFromValue(value: string) {
   return value.split("_").map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes.toString().padStart(2, "0")}:${remainder.toString().padStart(2, "0")}`;
+}
+
+function estimateStepSessionCalories(mode: "walk" | "run", steps: number, seconds: number, weightKg: number) {
+  const minutes = Math.max(1, seconds / 60);
+  const met = mode === "run" ? 8.3 : 3.5;
+  const timeCalories = (met * 3.5 * Math.max(45, weightKg || 78) / 200) * minutes;
+  const stepCalories = steps * (mode === "run" ? 0.055 : 0.04);
+  return Math.max(1, Math.round((timeCalories + stepCalories) / 2));
+}
+
+function estimateDistanceKm(steps: number, heightCm: number, mode: "walk" | "run") {
+  const strideM = Math.max(0.55, (heightCm || 170) * (mode === "run" ? 0.0072 : 0.00415));
+  return (steps * strideM) / 1000;
 }
 
 function yesterday() {
@@ -683,7 +706,74 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
   const [draft, setDraft] = useState<WorkoutLog | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [provider, setProvider] = useState("");
+  const [stepMode, setStepMode] = useState<"walk" | "run">("walk");
+  const [tracking, setTracking] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [steps, setSteps] = useState(0);
+  const [sensorSamples, setSensorSamples] = useState(0);
+  const [motionStatus, setMotionStatus] = useState("Manual steps ready.");
+  const stepStartRef = useRef<number | null>(null);
+  const baselineMagnitudeRef = useRef(0);
+  const lastSignalRef = useRef(0);
+  const lastStepAtRef = useRef(0);
+  const lastSensorAtRef = useRef(0);
+  const sensorLiveRef = useRef(false);
+  const sensorSamplesRef = useRef(0);
   const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
+
+  useEffect(() => {
+    if (!tracking) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      if (stepStartRef.current) setElapsedSeconds(Math.floor((now - stepStartRef.current) / 1000));
+      if (!sensorLiveRef.current && stepStartRef.current && now - stepStartRef.current > 4000) {
+        setMotionStatus("No phone motion samples received yet. Auto steps need a phone browser with motion permission.");
+      } else if (sensorLiveRef.current && now - lastSensorAtRef.current > 4500) {
+        setMotionStatus("Motion samples paused. Keep KYNEX open and carry the phone while walking or running.");
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [tracking]);
+
+  useEffect(() => {
+    if (!tracking) return;
+    const onMotion = (event: DeviceMotionEvent) => {
+      const linearAcceleration = event.acceleration;
+      const gravityAcceleration = event.accelerationIncludingGravity;
+      const hasLinear =
+        linearAcceleration &&
+        [linearAcceleration.x, linearAcceleration.y, linearAcceleration.z].some((value) => typeof value === "number" && Math.abs(value) > 0.05);
+      const acceleration = hasLinear ? linearAcceleration : gravityAcceleration;
+      if (!acceleration) return;
+      const x = acceleration.x ?? 0;
+      const y = acceleration.y ?? 0;
+      const z = acceleration.z ?? 0;
+      const magnitude = Math.sqrt(x * x + y * y + z * z);
+      const now = Date.now();
+      lastSensorAtRef.current = now;
+      sensorSamplesRef.current += 1;
+      if (sensorSamplesRef.current % 8 === 0) setSensorSamples(sensorSamplesRef.current);
+      if (!sensorLiveRef.current) {
+        sensorLiveRef.current = true;
+        baselineMagnitudeRef.current = magnitude;
+        setMotionStatus("Phone motion detected. Counting real movement-based steps.");
+      }
+      const baseline = hasLinear ? 0 : baselineMagnitudeRef.current * 0.92 + magnitude * 0.08;
+      baselineMagnitudeRef.current = baseline;
+      const rawSignal = hasLinear ? magnitude : Math.abs(magnitude - baseline);
+      const signal = lastSignalRef.current * 0.55 + rawSignal * 0.45;
+      const threshold = stepMode === "run" ? 1.55 : 1.05;
+      const minInterval = stepMode === "run" ? 230 : 320;
+      const warmedUp = stepStartRef.current ? now - stepStartRef.current > 900 : true;
+      if (warmedUp && signal > threshold && lastSignalRef.current <= threshold * 0.82 && now - lastStepAtRef.current > minInterval) {
+        setSteps((current) => current + 1);
+        lastStepAtRef.current = now;
+      }
+      lastSignalRef.current = signal;
+    };
+    window.addEventListener("devicemotion", onMotion);
+    return () => window.removeEventListener("devicemotion", onMotion);
+  }, [tracking]);
 
   async function analyze() {
     setAnalyzing(true);
@@ -695,7 +785,75 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
     setAnalyzing(false);
   }
 
-  return <div className="stack"><section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section><div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>{draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); }} />}</div>;
+  async function startStepSession() {
+    setDraft(null);
+    setSteps(0);
+    setSensorSamples(0);
+    setElapsedSeconds(0);
+    stepStartRef.current = Date.now();
+    sensorLiveRef.current = false;
+    sensorSamplesRef.current = 0;
+    lastSensorAtRef.current = 0;
+    baselineMagnitudeRef.current = 0;
+    lastSignalRef.current = 0;
+    lastStepAtRef.current = 0;
+    setTracking(true);
+    setMotionStatus("Checking device motion sensors. Keep KYNEX open and carry the phone.");
+    if (typeof DeviceMotionEvent !== "undefined") {
+      const motionWithPermission = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
+      if (motionWithPermission.requestPermission) {
+        try {
+          const permission = await motionWithPermission.requestPermission();
+          setMotionStatus(permission === "granted" ? "Motion permission granted. Start moving with your phone." : "Motion permission denied. Auto steps cannot run; enter steps manually.");
+        } catch {
+          setMotionStatus("Motion permission unavailable. Auto steps may not run; enter steps manually if needed.");
+        }
+      } else {
+        setMotionStatus("Checking Android/Chrome motion samples. Start moving with your phone.");
+      }
+    } else {
+      setMotionStatus("Motion sensors unavailable in this browser/device. Enter steps manually.");
+    }
+  }
+
+  function stopStepSession() {
+    setTracking(false);
+    const duration = Math.max(1, Math.round(elapsedSeconds / 60));
+    const distanceKm = estimateDistanceKm(steps, profile.heightCm, stepMode);
+    const calories = estimateStepSessionCalories(stepMode, steps, elapsedSeconds, profile.weightKg);
+    const speedKmh = elapsedSeconds > 0 ? distanceKm / (elapsedSeconds / 3600) : 0;
+    setProvider("step tracker");
+    setDraft({
+      id: makeId("workout"),
+      kind: "workout",
+      title: `${labelFromValue(stepMode)} - ${steps.toLocaleString()} steps`,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      duration,
+      calories,
+      effort: stepMode === "run" ? "Hard" : "Moderate",
+      score: Math.min(10, stepMode === "run" ? 7.8 + Math.min(1.5, steps / 7000) : 7 + Math.min(1.8, steps / 9000)),
+      movements: [labelFromValue(stepMode), `${steps} steps`, `${distanceKm.toFixed(2)} km`],
+      notes: `${steps.toLocaleString()} steps in ${formatElapsed(elapsedSeconds)}. Estimated distance ${distanceKm.toFixed(2)} km${speedKmh ? ` at ${speedKmh.toFixed(1)} km/h` : ""}.`,
+      source: "text",
+      date: today
+    });
+  }
+
+  function resetStepSession() {
+    setTracking(false);
+    stepStartRef.current = null;
+    sensorLiveRef.current = false;
+    sensorSamplesRef.current = 0;
+    lastSensorAtRef.current = 0;
+    baselineMagnitudeRef.current = 0;
+    lastSignalRef.current = 0;
+    setElapsedSeconds(0);
+    setSteps(0);
+    setSensorSamples(0);
+    setMotionStatus("Manual steps ready.");
+  }
+
+  return <div className="stack"><section className="step-card"><div className="section-title"><h3>Steps session</h3><Footprints size={16} /></div><div className="step-mode-toggle"><button type="button" className={stepMode === "walk" ? "active" : ""} onClick={() => setStepMode("walk")} disabled={tracking}>Walk</button><button type="button" className={stepMode === "run" ? "active" : ""} onClick={() => setStepMode("run")} disabled={tracking}>Run</button></div><div className="step-live"><span>{formatElapsed(elapsedSeconds)}</span><strong>{steps.toLocaleString()}</strong><small>real motion steps</small></div><div className="sensor-line"><span>{sensorLiveRef.current ? "Sensor live" : "Sensor waiting"}</span><span>{sensorSamples.toLocaleString()} samples</span></div><div className="step-adjust"><button type="button" onClick={() => setSteps((current) => Math.max(0, current - 100))} disabled={tracking && steps < 100}>-100</button><button type="button" onClick={() => setSteps((current) => current + 100)}>+100</button><NumberField label="Manual steps" value={steps} onChange={(value) => setSteps(Math.max(0, value))} /></div><p className="support-note">{motionStatus}</p><div className="quick-actions">{tracking ? <button type="button" className="primary-button" onClick={stopStepSession}><Square size={17} /> Done</button> : <button type="button" className="primary-button" onClick={startStepSession}><Play size={17} /> Start {stepMode}</button>}<button type="button" className="secondary-button" onClick={resetStepSession}><RotateCcw size={17} /> Reset</button></div></section><section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section><div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>{draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); resetStepSession(); }} />}</div>;
 }
 
 function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: LogEntry) => void }) {
@@ -753,7 +911,7 @@ function ReviewMeal({ draft, provider, onChange, onSave }: { draft: MealLog; pro
 }
 
 function ReviewWorkout({ draft, provider, onChange, onSave }: { draft: WorkoutLog; provider: string; onChange: (value: WorkoutLog) => void; onSave: () => void }) {
-  return <section className="review-card"><div className="section-title"><h3>AI effort draft</h3><span>{provider || draft.score.toFixed(1)}</span></div><EditableText label="Workout" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => onChange({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => onChange({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => onChange({ ...draft, effort })} />{draft.notes && <p className="support-note">{draft.notes}</p>}<button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Confirm workout</button></section>;
+  return <section className="review-card"><div className="section-title"><h3>Workout draft</h3><span>{provider || draft.score.toFixed(1)}</span></div><EditableText label="Workout" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => onChange({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => onChange({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => onChange({ ...draft, effort })} /><EditableText label="Notes" value={draft.notes ?? ""} onChange={(notes) => onChange({ ...draft, notes })} /><button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Confirm workout</button></section>;
 }
 
 function EditSheet({ entry, onClose, onSave, onDelete }: { entry: LogEntry; onClose: () => void; onSave: (entry: LogEntry) => void; onDelete: (id: string) => void }) {

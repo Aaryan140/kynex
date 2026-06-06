@@ -146,6 +146,7 @@ button {
 .score-card,
 .capture-card,
 .input-card,
+.step-card,
 .review-card,
 .profile-card,
 .profile-form,
@@ -421,6 +422,7 @@ button {
 
 .capture-card,
 .input-card,
+.step-card,
 .review-card,
 .profile-card,
 .profile-form,
@@ -524,6 +526,90 @@ button {
 
 .workout-preset-grid {
   grid-template-columns: repeat(4, 1fr);
+}
+
+.step-card {
+  display: grid;
+  gap: 12px;
+}
+
+.step-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #0d0d0d;
+}
+
+.step-mode-toggle button,
+.step-adjust button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.step-mode-toggle button.active {
+  background: var(--green);
+  color: #101010;
+}
+
+.step-live {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(198, 255, 0, 0.13), transparent 48%),
+    var(--surface);
+}
+
+.step-live span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.step-live strong {
+  color: var(--green);
+  font-size: 48px;
+  line-height: 1;
+}
+
+.step-live small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.sensor-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.step-adjust {
+  display: grid;
+  grid-template-columns: 68px 68px 1fr;
+  gap: 8px;
+  align-items: end;
+}
+
+.step-adjust button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .workout-preset-grid button {
