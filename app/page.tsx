@@ -20,13 +20,14 @@ import {
   Sparkles,
   User,
   Utensils,
+  Wallet,
   X
 } from "lucide-react";
 import { Session } from "@supabase/supabase-js";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
 
-type Tab = "home" | "food" | "workout" | "history" | "profile";
+type Tab = "home" | "food" | "workout" | "expenses" | "history" | "profile";
 type SourceMode = "photo" | "voice" | "text";
 
 type MealLog = {
@@ -59,11 +60,29 @@ type WorkoutLog = {
   score: number;
   movements: string[];
   notes?: string;
+  imageUrl?: string;
+  imagePath?: string;
+  imageFile?: File;
   source: "voice" | "text";
   date: string;
 };
 
-type LogEntry = MealLog | WorkoutLog;
+type ExpenseLog = {
+  id: string;
+  kind: "expense";
+  title: string;
+  time: string;
+  amount: number;
+  currency: string;
+  category: string;
+  merchant: string;
+  confidence: string;
+  notes?: string;
+  source: "voice" | "text";
+  date: string;
+};
+
+type LogEntry = MealLog | WorkoutLog | ExpenseLog;
 
 type UserProfile = {
   displayName: string;
@@ -169,10 +188,35 @@ function labelFromValue(value: string) {
   return value.split("_").map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
 }
 
+const expenseCategoryOptions: Array<[string, string]> = [
+  ["food", "Food"],
+  ["groceries", "Groceries"],
+  ["transport", "Transport"],
+  ["shopping", "Shopping"],
+  ["health", "Health"],
+  ["fitness", "Fitness"],
+  ["bills", "Bills"],
+  ["entertainment", "Entertainment"],
+  ["travel", "Travel"],
+  ["education", "Education"],
+  ["miscellaneous", "Miscellaneous"]
+];
+
 function yesterday() {
   const value = new Date();
   value.setDate(value.getDate() - 1);
   return value.toISOString().slice(0, 10);
+}
+
+function isWithinPeriod(date: string, period: "day" | "week" | "month") {
+  const now = new Date();
+  const value = new Date(`${date}T12:00:00`);
+  if (period === "day") return date === today;
+  if (period === "month") return value.getFullYear() === now.getFullYear() && value.getMonth() === now.getMonth();
+  const start = new Date(now);
+  start.setDate(now.getDate() - now.getDay());
+  start.setHours(0, 0, 0, 0);
+  return value >= start;
 }
 
 const starterLogs: LogEntry[] = [
@@ -217,6 +261,19 @@ const starterLogs: LogEntry[] = [
     confidence: "92%",
     imageUrl: "https://images.unsplash.com/photo-1511690743698-d9d85f2fbf38?auto=format&fit=crop&w=320&q=80",
     source: "voice",
+    date: today
+  },
+  {
+    id: "expense-1",
+    kind: "expense",
+    title: "Post-workout coffee",
+    time: "03:14 PM",
+    amount: 180,
+    currency: "INR",
+    category: "food",
+    merchant: "Cafe",
+    confidence: "AI",
+    source: "text",
     date: today
   },
   {
@@ -412,11 +469,12 @@ export default function KynexApp() {
   async function loadCloudLogs(userId: string) {
     if (!supabase) return;
     setSyncStatus("Loading your KYNEX logs...");
-    const [{ data: foods, error: foodError }, { data: workouts, error: workoutError }] = await Promise.all([
+    const [{ data: foods, error: foodError }, { data: workouts, error: workoutError }, { data: expenses, error: expenseError }] = await Promise.all([
       supabase.from("food_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(100),
-      supabase.from("workout_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(100)
+      supabase.from("workout_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(100),
+      supabase.from("expense_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(200)
     ]);
-    if (foodError || workoutError) {
+    if (foodError || workoutError || expenseError) {
       setSyncStatus("Supabase tables are not ready yet. Run supabase/schema.sql, then refresh.");
       setLogs(starterLogs);
       return;
@@ -447,21 +505,46 @@ export default function KynexApp() {
         } satisfies MealLog;
       })
     );
-    const workoutLogs = (workouts ?? []).map((row) => ({
+    const workoutLogs = await Promise.all(
+      (workouts ?? []).map(async (row) => {
+        let imageUrl: string | undefined;
+        if (row.image_path) {
+          const { data } = await supabase.storage.from("workout-images").createSignedUrl(row.image_path, 60 * 60);
+          imageUrl = data?.signedUrl;
+        }
+        return {
+          id: row.id,
+          kind: "workout" as const,
+          title: row.title,
+          time: toClock(row.logged_at),
+          duration: row.duration_minutes,
+          calories: row.calories_burned,
+          effort: row.effort,
+          score: Number(row.score),
+          movements: row.movements ?? [],
+          notes: row.ai_raw?.notes,
+          imageUrl,
+          imagePath: row.image_path ?? undefined,
+          source: row.source,
+          date: row.logged_at.slice(0, 10)
+        } satisfies WorkoutLog;
+      })
+    );
+    const expenseLogs = (expenses ?? []).map((row) => ({
       id: row.id,
-      kind: "workout" as const,
+      kind: "expense" as const,
       title: row.title,
       time: toClock(row.logged_at),
-      duration: row.duration_minutes,
-      calories: row.calories_burned,
-      effort: row.effort,
-      score: Number(row.score),
-      movements: row.movements ?? [],
+      amount: Number(row.amount),
+      currency: row.currency,
+      category: row.category,
+      merchant: row.merchant ?? "",
+      confidence: row.confidence ? `${Math.round(Number(row.confidence) * 100)}%` : "AI",
       notes: row.ai_raw?.notes,
       source: row.source,
       date: row.logged_at.slice(0, 10)
-    } satisfies WorkoutLog));
-    setLogs([...foodLogs, ...workoutLogs].sort((a, b) => (a.date < b.date ? 1 : -1)));
+    } satisfies ExpenseLog));
+    setLogs([...foodLogs, ...workoutLogs, ...expenseLogs].sort((a, b) => (a.date < b.date ? 1 : -1)));
     setSyncStatus("Cloud sync active.");
   }
 
@@ -470,6 +553,15 @@ export default function KynexApp() {
     const extension = entry.imageFile.name.split(".").pop() || "jpg";
     const imagePath = `${user.id}/${Date.now()}-${makeId("meal")}.${extension}`;
     const { error } = await supabase.storage.from("food-images").upload(imagePath, entry.imageFile, { upsert: false });
+    if (error) throw error;
+    return imagePath;
+  }
+
+  async function uploadWorkoutImage(entry: WorkoutLog) {
+    if (!supabase || !user || !entry.imageFile) return entry.imagePath;
+    const extension = entry.imageFile.name.split(".").pop() || "jpg";
+    const imagePath = `${user.id}/${Date.now()}-${makeId("workout")}.${extension}`;
+    const { error } = await supabase.storage.from("workout-images").upload(imagePath, entry.imageFile, { upsert: false });
     if (error) throw error;
     return imagePath;
   }
@@ -498,16 +590,32 @@ export default function KynexApp() {
       }).select().single();
       if (error) { setSyncStatus(error.message); return; }
       setLogs((current) => [{ ...entry, id: data.id, imagePath }, ...current]);
-    } else {
+    } else if (entry.kind === "workout") {
+      const imagePath = await uploadWorkoutImage(entry);
       const { data, error } = await supabase.from("workout_logs").insert({
         user_id: user.id,
         title: entry.title,
         source: entry.source,
+        image_path: imagePath,
         duration_minutes: entry.duration,
         calories_burned: entry.calories,
         effort: entry.effort,
         movements: entry.movements,
         score: entry.score,
+        ai_raw: { notes: entry.notes }
+      }).select().single();
+      if (error) { setSyncStatus(error.message); return; }
+      setLogs((current) => [{ ...entry, id: data.id, imagePath }, ...current]);
+    } else {
+      const { data, error } = await supabase.from("expense_logs").insert({
+        user_id: user.id,
+        title: entry.title,
+        amount: entry.amount,
+        currency: entry.currency,
+        category: entry.category || "miscellaneous",
+        merchant: entry.merchant || null,
+        source: entry.source,
+        confidence: Number.parseFloat(entry.confidence) / 100 || null,
         ai_raw: { notes: entry.notes }
       }).select().single();
       if (error) { setSyncStatus(error.message); return; }
@@ -520,10 +628,12 @@ export default function KynexApp() {
   async function updateLog(updated: LogEntry) {
     if (supabase && user) {
       setSyncStatus("Saving changes...");
-      const table = updated.kind === "food" ? "food_logs" : "workout_logs";
+      const table = updated.kind === "food" ? "food_logs" : updated.kind === "workout" ? "workout_logs" : "expense_logs";
       const payload = updated.kind === "food"
         ? { title: updated.title, calories: updated.calories, protein_g: updated.protein, carbs_g: updated.carbs, fat_g: updated.fat, score: updated.score, updated_at: new Date().toISOString() }
-        : { title: updated.title, duration_minutes: updated.duration, calories_burned: updated.calories, effort: updated.effort, score: updated.score, updated_at: new Date().toISOString() };
+        : updated.kind === "workout"
+          ? { title: updated.title, duration_minutes: updated.duration, calories_burned: updated.calories, effort: updated.effort, score: updated.score, updated_at: new Date().toISOString() }
+          : { title: updated.title, amount: updated.amount, currency: updated.currency, category: updated.category || "miscellaneous", merchant: updated.merchant || null, updated_at: new Date().toISOString() };
       const { error } = await supabase.from(table).update(payload).eq("id", updated.id).eq("user_id", user.id);
       if (error) { setSyncStatus(error.message); return; }
       setSyncStatus("Changes saved.");
@@ -536,7 +646,7 @@ export default function KynexApp() {
     const existing = logs.find((log) => log.id === id);
     if (supabase && user && existing) {
       setSyncStatus("Deleting log...");
-      const table = existing.kind === "food" ? "food_logs" : "workout_logs";
+      const table = existing.kind === "food" ? "food_logs" : existing.kind === "workout" ? "workout_logs" : "expense_logs";
       const { error } = await supabase.from(table).delete().eq("id", id).eq("user_id", user.id);
       if (error) { setSyncStatus(error.message); return; }
       setSyncStatus("Log deleted.");
@@ -548,12 +658,14 @@ export default function KynexApp() {
   const todaysLogs = useMemo(() => logs.filter((log) => log.date === today), [logs]);
   const meals = todaysLogs.filter((log): log is MealLog => log.kind === "food");
   const workouts = todaysLogs.filter((log): log is WorkoutLog => log.kind === "workout");
+  const expenses = logs.filter((log): log is ExpenseLog => log.kind === "expense");
   const caloriesIn = meals.reduce((total, meal) => total + meal.calories, 0);
   const caloriesOut = workouts.reduce((total, workout) => total + workout.calories, 0);
   const protein = meals.reduce((total, meal) => total + meal.protein, 0);
   const carbs = meals.reduce((total, meal) => total + meal.carbs, 0);
   const fat = meals.reduce((total, meal) => total + meal.fat, 0);
-  const score = todaysLogs.length ? todaysLogs.reduce((total, log) => total + log.score, 0) / todaysLogs.length : 0;
+  const scoredLogs = [...meals, ...workouts];
+  const score = scoredLogs.length ? scoredLogs.reduce((total, log) => total + log.score, 0) / scoredLogs.length : 0;
 
   if (!authReady) return <LoadingShell />;
 
@@ -566,6 +678,7 @@ export default function KynexApp() {
             {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
             {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
             {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
+            {tab === "expenses" && <ExpenseScreen expenses={expenses} onSave={saveLog} onEdit={setEditing} />}
             {tab === "history" && <HistoryScreen logs={logs} onEdit={setEditing} />}
             {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} profile={profile} onSave={saveProfile} />}
           </>}
@@ -586,7 +699,7 @@ function LoadingShell() {
 }
 
 function Header({ tab, userEmail, syncStatus }: { tab: Tab; userEmail: string | null; syncStatus: string }) {
-  const titles: Record<Tab, string> = { home: "Home", food: "Log Food", workout: "Log Workout", history: "History", profile: "Profile" };
+  const titles: Record<Tab, string> = { home: "Home", food: "Log Food", workout: "Log Workout", expenses: "Expenses", history: "History", profile: "Profile" };
   return <header className="top-bar"><div className="brand-row"><span className="brand-mark">K</span><strong>KYNEX</strong></div><div className="top-actions"><button type="button" aria-label="Search"><Search size={16} /></button><button type="button" aria-label="Settings"><Settings size={16} /></button></div><h2>{titles[tab]}</h2><p className="sync-line">{userEmail ? `${userEmail} - ${syncStatus}` : syncStatus}</p></header>;
 }
 
@@ -683,7 +796,17 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
   const [draft, setDraft] = useState<WorkoutLog | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [provider, setProvider] = useState("");
+  const [imageUrl, setImageUrl] = useState<string | undefined>();
+  const [imageFile, setImageFile] = useState<File | undefined>();
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
+
+  function onImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    setImageUrl(URL.createObjectURL(file));
+  }
 
   async function analyze() {
     setAnalyzing(true);
@@ -691,11 +814,52 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
-    setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, source: input ? "text" : "voice", date: today });
+    setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, imageUrl, imageFile, source: input ? "text" : "voice", date: today });
     setAnalyzing(false);
   }
 
-  return <div className="stack"><section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section><div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>{draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); }} />}</div>;
+  return (
+    <div className="stack">
+      <section className="capture-card workout-capture">
+        <div className="capture-preview">{imageUrl ? <img src={imageUrl} alt="Workout progress" /> : <><Camera size={34} /><span>Progress photo</span></>}</div>
+        <div className="capture-actions">
+          <input ref={fileRef} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={onImage} />
+          <button type="button" className="secondary-button" onClick={() => fileRef.current?.click()}><ImagePlus size={17} /> Add image</button>
+          {imageUrl && <button type="button" className="voice-button" onClick={() => { setImageUrl(undefined); setImageFile(undefined); }}>Remove</button>}
+        </div>
+      </section>
+      <section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section>
+      <div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>
+      {draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); setImageUrl(undefined); setImageFile(undefined); }} />}
+    </div>
+  );
+}
+
+function ExpenseScreen({ expenses, onSave, onEdit }: { expenses: ExpenseLog[]; onSave: (entry: LogEntry) => void; onEdit: (entry: LogEntry) => void }) {
+  const [input, setInput] = useState("");
+  const [period, setPeriod] = useState<"day" | "week" | "month">("day");
+  const [draft, setDraft] = useState<ExpenseLog | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [provider, setProvider] = useState("");
+  const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
+  const visibleExpenses = expenses.filter((expense) => isWithinPeriod(expense.date, period));
+  const total = visibleExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const categories = visibleExpenses.reduce<Record<string, number>>((result, expense) => {
+    result[expense.category] = (result[expense.category] ?? 0) + expense.amount;
+    return result;
+  }, {});
+
+  async function analyze() {
+    setAnalyzing(true);
+    const response = await fetch("/api/analyze/expense", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input }) });
+    const data = await response.json();
+    setProvider(data.provider ?? "ai");
+    const analysis = data.analysis;
+    setDraft({ id: makeId("expense"), kind: "expense", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), amount: Number(analysis.amount ?? 0), currency: analysis.currency || "INR", category: analysis.category || "miscellaneous", merchant: analysis.merchant || "", confidence: `${Math.round((analysis.confidence ?? 0.65) * 100)}%`, notes: analysis.notes, source: input ? "text" : "voice", date: today });
+    setAnalyzing(false);
+  }
+
+  return <div className="stack"><section className="expense-summary"><div><p className="eyebrow">{period} spending</p><strong>{visibleExpenses[0]?.currency ?? "INR"} {total.toLocaleString()}</strong><span>{visibleExpenses.length} expenses logged</span></div><div className="period-toggle">{(["day", "week", "month"] as const).map((item) => <button type="button" key={item} className={period === item ? "active" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></section><section className="input-card"><div className="input-heading"><label htmlFor="expense-input">Add expense</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="expense-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: paid Rs 420 for groceries at Reliance..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze expense"}</button></section>{Object.keys(categories).length > 0 && <section className="category-list"><div className="section-title"><h3>Categories</h3><span>{period}</span></div>{Object.entries(categories).map(([category, amount]) => <div className="category-row" key={category}><span>{labelFromValue(category)}</span><b>{visibleExpenses[0]?.currency ?? "INR"} {amount.toLocaleString()}</b></div>)}</section>}{visibleExpenses.length > 0 && <section><div className="section-title"><h3>Recent expenses</h3><span>{visibleExpenses.length}</span></div><div className="log-list">{visibleExpenses.slice(0, 8).map((expense) => <LogCard key={expense.id} entry={expense} onEdit={onEdit} />)}</div></section>}{draft && <ReviewExpense draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); }} />}</div>;
 }
 
 function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: LogEntry) => void }) {
@@ -753,21 +917,30 @@ function ReviewMeal({ draft, provider, onChange, onSave }: { draft: MealLog; pro
 }
 
 function ReviewWorkout({ draft, provider, onChange, onSave }: { draft: WorkoutLog; provider: string; onChange: (value: WorkoutLog) => void; onSave: () => void }) {
-  return <section className="review-card"><div className="section-title"><h3>AI effort draft</h3><span>{provider || draft.score.toFixed(1)}</span></div><EditableText label="Workout" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => onChange({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => onChange({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => onChange({ ...draft, effort })} />{draft.notes && <p className="support-note">{draft.notes}</p>}<button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Confirm workout</button></section>;
+  return <section className="review-card"><div className="section-title"><h3>AI effort draft</h3><span>{provider || draft.score.toFixed(1)}</span></div>{draft.imageUrl && <img className="review-photo" src={draft.imageUrl} alt="Workout progress draft" />}<EditableText label="Workout" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => onChange({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => onChange({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => onChange({ ...draft, effort })} />{draft.notes && <p className="support-note">{draft.notes}</p>}<button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Confirm workout</button></section>;
+}
+
+function ReviewExpense({ draft, provider, onChange, onSave }: { draft: ExpenseLog; provider: string; onChange: (value: ExpenseLog) => void; onSave: () => void }) {
+  return <section className="review-card"><div className="section-title"><h3>AI expense draft</h3><span>{provider || draft.confidence}</span></div><EditableText label="Expense" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Amount" value={draft.amount} step={0.01} onChange={(amount) => onChange({ ...draft, amount })} /><EditableText label="Currency" value={draft.currency} onChange={(currency) => onChange({ ...draft, currency })} /></div><SelectField label="Category" value={draft.category} options={expenseCategoryOptions} onChange={(category) => onChange({ ...draft, category })} /><EditableText label="Merchant" value={draft.merchant} onChange={(merchant) => onChange({ ...draft, merchant })} />{draft.notes && <p className="support-note">{draft.notes}</p>}<button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Save expense</button></section>;
 }
 
 function EditSheet({ entry, onClose, onSave, onDelete }: { entry: LogEntry; onClose: () => void; onSave: (entry: LogEntry) => void; onDelete: (id: string) => void }) {
   const [draft, setDraft] = useState(entry);
-  return <div className="modal-backdrop"><form className="edit-sheet" onSubmit={(event: FormEvent) => { event.preventDefault(); onSave(draft); }}><div className="sheet-header"><h3>Edit log</h3><button type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><EditableText label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title } as LogEntry)} />{draft.kind === "food" ? <div className="nutrition-grid"><NumberField label="Calories" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /><NumberField label="Protein" value={draft.protein} onChange={(protein) => setDraft({ ...draft, protein })} /><NumberField label="Carbs" value={draft.carbs} onChange={(carbs) => setDraft({ ...draft, carbs })} /><NumberField label="Fat" value={draft.fat} onChange={(fat) => setDraft({ ...draft, fat })} /></div> : <div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => setDraft({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /></div>}<NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score } as LogEntry)} /><div className="sheet-actions"><button type="button" className="danger-button" onClick={() => onDelete(entry.id)}>Delete</button><button type="submit" className="primary-button">Save changes</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="edit-sheet" onSubmit={(event: FormEvent) => { event.preventDefault(); onSave(draft); }}><div className="sheet-header"><h3>Edit log</h3><button type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><EditableText label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title } as LogEntry)} />{draft.kind === "food" && <><div className="nutrition-grid"><NumberField label="Calories" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /><NumberField label="Protein" value={draft.protein} onChange={(protein) => setDraft({ ...draft, protein })} /><NumberField label="Carbs" value={draft.carbs} onChange={(carbs) => setDraft({ ...draft, carbs })} /><NumberField label="Fat" value={draft.fat} onChange={(fat) => setDraft({ ...draft, fat })} /></div><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /></>}{draft.kind === "workout" && <><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => setDraft({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => setDraft({ ...draft, effort })} /><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /></>}{draft.kind === "expense" && <><div className="nutrition-grid"><NumberField label="Amount" value={draft.amount} step={0.01} onChange={(amount) => setDraft({ ...draft, amount })} /><EditableText label="Currency" value={draft.currency} onChange={(currency) => setDraft({ ...draft, currency })} /></div><SelectField label="Category" value={draft.category} options={expenseCategoryOptions} onChange={(category) => setDraft({ ...draft, category })} /><EditableText label="Merchant" value={draft.merchant} onChange={(merchant) => setDraft({ ...draft, merchant })} /></>}<div className="sheet-actions"><button type="button" className="danger-button" onClick={() => onDelete(entry.id)}>Delete</button><button type="submit" className="primary-button">Save changes</button></div></form></div>;
 }
 
 function LogCard({ entry, onEdit }: { entry: LogEntry; onEdit: (entry: LogEntry) => void }) {
   const isFood = entry.kind === "food";
-  return <article className={isFood && entry.imageUrl ? "log-card with-photo" : "log-card"}>{isFood && entry.imageUrl ? <img className="meal-thumb" src={entry.imageUrl} alt={`${entry.title} meal`} /> : <div className={isFood ? "log-icon food" : "log-icon workout"}>{isFood ? <Utensils size={16} /> : <Dumbbell size={16} />}</div>}<div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{isFood ? "Food" : entry.effort}</span></div><h4>{entry.title}</h4><p>{isFood ? `${entry.calories} kcal - ${entry.protein}g protein` : `${entry.calories} kcal - ${entry.duration} min`}</p></div><button type="button" className="edit-button" onClick={() => onEdit(entry)} aria-label={`Edit ${entry.title}`}><Pencil size={15} /></button></article>;
+  const isExpense = entry.kind === "expense";
+  const hasPhoto = !isExpense && Boolean(entry.imageUrl);
+  const iconClass = isFood ? "food" : isExpense ? "expense" : "workout";
+  const meta = isFood ? "Food" : isExpense ? labelFromValue(entry.category) : entry.effort;
+  const detail = isFood ? `${entry.calories} kcal - ${entry.protein}g protein` : isExpense ? `${entry.currency} ${entry.amount.toLocaleString()}${entry.merchant ? ` - ${entry.merchant}` : ""}` : `${entry.calories} kcal - ${entry.duration} min`;
+  return <article className={hasPhoto ? "log-card with-photo" : "log-card"}>{hasPhoto ? <img className="meal-thumb" src={entry.imageUrl} alt={`${entry.title} ${entry.kind}`} /> : <div className={`log-icon ${iconClass}`}>{isFood ? <Utensils size={16} /> : isExpense ? <Wallet size={16} /> : <Dumbbell size={16} />}</div>}<div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{meta}</span></div><h4>{entry.title}</h4><p>{detail}</p></div><button type="button" className="edit-button" onClick={() => onEdit(entry)} aria-label={`Edit ${entry.title}`}><Pencil size={15} /></button></article>;
 }
 
 function BottomNav({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {
-  const items: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [{ key: "home", label: "Home", icon: <Home size={18} /> }, { key: "food", label: "Food", icon: <Utensils size={18} /> }, { key: "workout", label: "Workout", icon: <Dumbbell size={18} /> }, { key: "history", label: "History", icon: <BarChart3 size={18} /> }, { key: "profile", label: "Profile", icon: <User size={18} /> }];
+  const items: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [{ key: "home", label: "Home", icon: <Home size={17} /> }, { key: "food", label: "Food", icon: <Utensils size={17} /> }, { key: "workout", label: "Workout", icon: <Dumbbell size={17} /> }, { key: "expenses", label: "Spend", icon: <Wallet size={17} /> }, { key: "history", label: "History", icon: <BarChart3 size={17} /> }, { key: "profile", label: "Profile", icon: <User size={17} /> }];
   return <nav className="bottom-nav">{items.map((item) => <button type="button" key={item.key} className={active === item.key ? "active" : ""} onClick={() => onChange(item.key)}>{item.icon}<span>{item.label}</span></button>)}</nav>;
 }
 
