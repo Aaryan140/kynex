@@ -144,6 +144,7 @@ button {
 
 .hero-card,
 .score-card,
+.steps-mini-card,
 .capture-card,
 .input-card,
 .review-card,
@@ -356,6 +357,11 @@ button {
   color: #78d2ff;
 }
 
+.log-icon.steps {
+  background: rgba(0, 255, 135, 0.12);
+  color: var(--green-deep);
+}
+
 .log-copy h4,
 .log-copy p,
 .log-topline {
@@ -429,6 +435,9 @@ button {
 .capture-card,
 .input-card,
 .review-card,
+.steps-hero,
+.steps-mini-card,
+.step-session-card,
 .expense-summary,
 .category-list,
 .profile-card,
@@ -521,7 +530,8 @@ button {
 }
 
 .input-card .full,
-.review-card .full {
+.review-card .full,
+.step-session-card .full {
   width: 100%;
   margin-top: 12px;
 }
@@ -551,6 +561,144 @@ button {
 .review-card {
   border-color: rgba(198, 255, 0, 0.35);
   box-shadow: 0 0 28px rgba(198, 255, 0, 0.08);
+}
+
+.steps-mini-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 96px;
+}
+
+.steps-mini-card strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--green-deep);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.steps-mini-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.steps-hero,
+.step-session-card {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: linear-gradient(145deg, #151515, #111);
+}
+
+.steps-hero {
+  display: grid;
+  gap: 14px;
+}
+
+.steps-hero strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--green-deep);
+  font-size: 46px;
+  line-height: 0.95;
+}
+
+.steps-hero span,
+.step-session-main span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.step-progress {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.step-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--green), var(--green-deep));
+}
+
+.step-session-card {
+  display: grid;
+  gap: 12px;
+}
+
+.step-session-main {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #0e0e0e;
+  color: var(--green);
+}
+
+.step-session-main strong {
+  color: var(--text);
+  font-size: 48px;
+  line-height: 0.95;
+}
+
+.step-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.step-stat-grid span {
+  display: grid;
+  gap: 3px;
+  min-height: 54px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e0e0e;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.step-stat-grid b {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.step-stat-grid.compact {
+  margin-top: 12px;
+}
+
+.step-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.standalone-input {
+  width: 100%;
+  height: 48px;
+  margin-top: 10px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0d0d0d;
+  color: var(--text);
+  outline: 0;
+}
+
+.standalone-input:focus {
+  border-color: var(--green);
+}
+
+.support-note.quiet {
+  color: var(--muted);
 }
 
 .review-photo {
@@ -818,7 +966,7 @@ button {
   position: absolute;
   inset: auto 0 0;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   height: 78px;
   border-top: 1px solid var(--line);
   background: rgba(8, 8, 8, 0.96);
@@ -832,7 +980,7 @@ button {
   border: 0;
   background: transparent;
   color: #747a72;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 800;
 }
 

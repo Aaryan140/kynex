@@ -7,6 +7,7 @@ import {
   Check,
   ChevronRight,
   Dumbbell,
+  Footprints,
   Home,
   ImagePlus,
   Loader2,
@@ -27,7 +28,7 @@ import { Session } from "@supabase/supabase-js";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
 
-type Tab = "home" | "food" | "workout" | "expenses" | "history" | "profile";
+type Tab = "home" | "food" | "workout" | "steps" | "expenses" | "history" | "profile";
 type SourceMode = "photo" | "voice" | "text";
 
 type MealLog = {
@@ -79,6 +80,17 @@ type ExpenseLog = {
   confidence: string;
   notes?: string;
   source: "voice" | "text";
+  date: string;
+};
+
+type StepLog = {
+  id: string;
+  title: string;
+  time: string;
+  steps: number;
+  distanceKm: number;
+  calories: number;
+  source: "motion" | "manual";
   date: string;
 };
 
@@ -301,6 +313,17 @@ function toClock(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function estimateStepDistanceKm(steps: number, profile: UserProfile) {
+  const heightMeters = Math.max(1.4, (Number(profile.heightCm) || 170) / 100);
+  const strideMeters = heightMeters * 0.415;
+  return Math.round((steps * strideMeters / 1000) * 100) / 100;
+}
+
+function estimateStepCalories(steps: number, profile: UserProfile) {
+  const weight = Math.max(45, Number(profile.weightKg) || 75);
+  return Math.round(steps * weight * 0.00053);
+}
+
 async function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -344,9 +367,104 @@ function useSpeechInput(onTranscript: (value: string) => void) {
   return { listening, supported, toggle };
 }
 
+function useStepCounter() {
+  const [tracking, setTracking] = useState(false);
+  const [supported, setSupported] = useState(true);
+  const [steps, setSteps] = useState(0);
+  const [signal, setSignal] = useState(0);
+  const [message, setMessage] = useState("Ready");
+  const baselineRef = useRef(9.81);
+  const armedRef = useRef(true);
+  const lastStepAtRef = useRef(0);
+  const listenerRef = useRef<((event: DeviceMotionEvent) => void) | null>(null);
+
+  function stop() {
+    if (typeof window !== "undefined" && listenerRef.current) {
+      window.removeEventListener("devicemotion", listenerRef.current);
+      listenerRef.current = null;
+    }
+    setTracking(false);
+    setMessage("Session paused");
+  }
+
+  async function start() {
+    if (typeof window === "undefined" || !("DeviceMotionEvent" in window)) {
+      setSupported(false);
+      setMessage("Motion sensor unavailable");
+      return;
+    }
+
+    const MotionEventWithPermission = window.DeviceMotionEvent as typeof DeviceMotionEvent & {
+      requestPermission?: () => Promise<"granted" | "denied">;
+    };
+
+    if (typeof MotionEventWithPermission.requestPermission === "function") {
+      const permission = await MotionEventWithPermission.requestPermission();
+      if (permission !== "granted") {
+        setSupported(false);
+        setMessage("Motion access denied");
+        return;
+      }
+    }
+
+    baselineRef.current = 9.81;
+    armedRef.current = true;
+    lastStepAtRef.current = 0;
+    setSteps(0);
+    setSignal(0);
+    setSupported(true);
+
+    const onMotion = (event: DeviceMotionEvent) => {
+      const acceleration = event.accelerationIncludingGravity ?? event.acceleration;
+      const x = acceleration?.x ?? 0;
+      const y = acceleration?.y ?? 0;
+      const z = acceleration?.z ?? 0;
+      const magnitude = Math.sqrt(x * x + y * y + z * z);
+      if (!Number.isFinite(magnitude) || magnitude === 0) return;
+
+      baselineRef.current = baselineRef.current * 0.92 + magnitude * 0.08;
+      const currentSignal = Math.abs(magnitude - baselineRef.current);
+      setSignal(Math.round(currentSignal * 10) / 10);
+
+      const now = Date.now();
+      if (armedRef.current && currentSignal > 1.15 && now - lastStepAtRef.current > 320) {
+        lastStepAtRef.current = now;
+        armedRef.current = false;
+        setSteps((current) => current + 1);
+      }
+      if (currentSignal < 0.35) armedRef.current = true;
+    };
+
+    listenerRef.current = onMotion;
+    window.addEventListener("devicemotion", onMotion);
+    setTracking(true);
+    setMessage("Tracking foreground motion");
+  }
+
+  function reset() {
+    setSteps(0);
+    setSignal(0);
+    baselineRef.current = 9.81;
+    armedRef.current = true;
+    lastStepAtRef.current = 0;
+    setMessage(tracking ? "Tracking foreground motion" : "Ready");
+  }
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && listenerRef.current) {
+        window.removeEventListener("devicemotion", listenerRef.current);
+      }
+    };
+  }, []);
+
+  return { tracking, supported, steps, signal, message, start, stop, reset };
+}
+
 export default function KynexApp() {
   const [tab, setTab] = useState<Tab>("home");
   const [logs, setLogs] = useState<LogEntry[]>(starterLogs);
+  const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
   const [editing, setEditing] = useState<LogEntry | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<UserProfile>(() => defaultProfile());
@@ -378,6 +496,7 @@ export default function KynexApp() {
   useEffect(() => {
     if (!supabase || !user) {
       setLogs(starterLogs);
+      setStepLogs([]);
       setProfile(defaultProfile());
       return;
     }
@@ -469,14 +588,16 @@ export default function KynexApp() {
   async function loadCloudLogs(userId: string) {
     if (!supabase) return;
     setSyncStatus("Loading your KYNEX logs...");
-    const [{ data: foods, error: foodError }, { data: workouts, error: workoutError }, { data: expenses, error: expenseError }] = await Promise.all([
+    const [{ data: foods, error: foodError }, { data: workouts, error: workoutError }, { data: expenses, error: expenseError }, { data: steps, error: stepError }] = await Promise.all([
       supabase.from("food_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(100),
       supabase.from("workout_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(100),
-      supabase.from("expense_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(200)
+      supabase.from("expense_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(200),
+      supabase.from("step_logs").select("*").eq("user_id", userId).order("logged_at", { ascending: false }).limit(120)
     ]);
-    if (foodError || workoutError || expenseError) {
+    if (foodError || workoutError || expenseError || stepError) {
       setSyncStatus("Supabase tables are not ready yet. Run supabase/schema.sql, then refresh.");
       setLogs(starterLogs);
+      setStepLogs([]);
       return;
     }
     const foodLogs = await Promise.all(
@@ -544,7 +665,18 @@ export default function KynexApp() {
       source: row.source,
       date: row.logged_at.slice(0, 10)
     } satisfies ExpenseLog));
+    const cloudStepLogs = (steps ?? []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      time: toClock(row.logged_at),
+      steps: Number(row.steps),
+      distanceKm: Number(row.distance_km),
+      calories: Number(row.calories),
+      source: row.source,
+      date: row.logged_at.slice(0, 10)
+    } satisfies StepLog));
     setLogs([...foodLogs, ...workoutLogs, ...expenseLogs].sort((a, b) => (a.date < b.date ? 1 : -1)));
+    setStepLogs(cloudStepLogs);
     setSyncStatus("Cloud sync active.");
   }
 
@@ -655,10 +787,41 @@ export default function KynexApp() {
     setEditing(null);
   }
 
+  async function saveStepLog(entry: StepLog) {
+    if (!supabase || !user) {
+      setStepLogs((current) => [{ ...entry, id: makeId("steps") }, ...current]);
+      return;
+    }
+    setSyncStatus("Saving steps...");
+    const { data, error } = await supabase.from("step_logs").insert({
+      user_id: user.id,
+      title: entry.title,
+      steps: entry.steps,
+      distance_km: entry.distanceKm,
+      calories: entry.calories,
+      source: entry.source
+    }).select().single();
+    if (error) { setSyncStatus(error.message); return; }
+    setStepLogs((current) => [{ ...entry, id: data.id, time: toClock(data.logged_at), date: data.logged_at.slice(0, 10) }, ...current]);
+    setSyncStatus("Steps saved.");
+  }
+
+  async function deleteStepLog(id: string) {
+    if (supabase && user) {
+      setSyncStatus("Deleting steps...");
+      const { error } = await supabase.from("step_logs").delete().eq("id", id).eq("user_id", user.id);
+      if (error) { setSyncStatus(error.message); return; }
+      setSyncStatus("Steps deleted.");
+    }
+    setStepLogs((current) => current.filter((log) => log.id !== id));
+  }
+
   const todaysLogs = useMemo(() => logs.filter((log) => log.date === today), [logs]);
+  const todaysSteps = useMemo(() => stepLogs.filter((log) => log.date === today), [stepLogs]);
   const meals = todaysLogs.filter((log): log is MealLog => log.kind === "food");
   const workouts = todaysLogs.filter((log): log is WorkoutLog => log.kind === "workout");
   const expenses = logs.filter((log): log is ExpenseLog => log.kind === "expense");
+  const stepsToday = todaysSteps.reduce((total, log) => total + log.steps, 0);
   const caloriesIn = meals.reduce((total, meal) => total + meal.calories, 0);
   const caloriesOut = workouts.reduce((total, workout) => total + workout.calories, 0);
   const protein = meals.reduce((total, meal) => total + meal.protein, 0);
@@ -675,9 +838,10 @@ export default function KynexApp() {
         <Header tab={tab} userEmail={user?.email ?? null} syncStatus={syncStatus} />
         <div className="screen-content">
           {supabase && !user ? <AuthScreen /> : user && !isProfileComplete(profile) ? <ProfileSetupScreen email={user.email} profile={profile} onSave={saveProfile} /> : <>
-            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
+            {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} stepsToday={stepsToday} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
             {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
             {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
+            {tab === "steps" && <StepsScreen stepLogs={stepLogs} profile={profile} onSave={saveStepLog} onDelete={deleteStepLog} />}
             {tab === "expenses" && <ExpenseScreen expenses={expenses} onSave={saveLog} onEdit={setEditing} />}
             {tab === "history" && <HistoryScreen logs={logs} onEdit={setEditing} />}
             {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} profile={profile} onSave={saveProfile} />}
@@ -686,8 +850,8 @@ export default function KynexApp() {
         {(!supabase || (user && isProfileComplete(profile))) && <BottomNav active={tab} onChange={setTab} />}
       </section>
       <aside className="desktop-panel">
-        <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now uses your profile for better calorie and effort estimates while Supabase keeps logs and avatar data private.</p></div>
-        <div className="desktop-grid"><Metric label="Calories in" value={caloriesIn.toLocaleString()} tone="green" /><Metric label="Burned" value={caloriesOut.toLocaleString()} tone="gold" /><Metric label="Protein" value={`${protein}g`} tone="green" /><Metric label="Readiness" value={`${score.toFixed(1)}`} tone="gold" /></div>
+        <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now uses your profile for better calorie and effort estimates while Supabase keeps logs, steps, and avatar data private.</p></div>
+        <div className="desktop-grid"><Metric label="Calories in" value={caloriesIn.toLocaleString()} tone="green" /><Metric label="Burned" value={caloriesOut.toLocaleString()} tone="gold" /><Metric label="Steps" value={stepsToday.toLocaleString()} tone="green" /><Metric label="Readiness" value={`${score.toFixed(1)}`} tone="gold" /></div>
       </aside>
       {editing && <EditSheet entry={editing} onClose={() => setEditing(null)} onSave={updateLog} onDelete={deleteLog} />}
     </main>
@@ -699,7 +863,7 @@ function LoadingShell() {
 }
 
 function Header({ tab, userEmail, syncStatus }: { tab: Tab; userEmail: string | null; syncStatus: string }) {
-  const titles: Record<Tab, string> = { home: "Home", food: "Log Food", workout: "Log Workout", expenses: "Expenses", history: "History", profile: "Profile" };
+  const titles: Record<Tab, string> = { home: "Home", food: "Log Food", workout: "Log Workout", steps: "Steps", expenses: "Expenses", history: "History", profile: "Profile" };
   return <header className="top-bar"><div className="brand-row"><span className="brand-mark">K</span><strong>KYNEX</strong></div><div className="top-actions"><button type="button" aria-label="Search"><Search size={16} /></button><button type="button" aria-label="Settings"><Settings size={16} /></button></div><h2>{titles[tab]}</h2><p className="sync-line">{userEmail ? `${userEmail} - ${syncStatus}` : syncStatus}</p></header>;
 }
 
@@ -741,14 +905,15 @@ function AuthScreen() {
   );
 }
 
-function HomeScreen({ caloriesIn, caloriesOut, protein, carbs, fat, score, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; carbs: number; fat: number; score: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
+function HomeScreen({ caloriesIn, caloriesOut, protein, carbs, fat, score, stepsToday, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; carbs: number; fat: number; score: number; stepsToday: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
   return (
     <div className="stack">
       <section className="hero-card"><p className="eyebrow">Remaining {labelFromValue(profile.goal).toLowerCase()} target</p><div className="hero-stat"><span>{Math.max(0, profile.dailyCalorieTarget - caloriesIn + caloriesOut).toLocaleString()}</span><small>kcal</small></div><div className="split-stats"><span><b>{caloriesIn.toLocaleString()}</b>eaten</span><span><b>{caloriesOut.toLocaleString()}</b>burned</span></div></section>
       <section><div className="section-title"><h3>Daily Macros</h3><Activity size={16} /></div><div className="macro-grid"><Ring label="Protein" value={protein} max={profile.proteinTarget} /><Ring label="Carbs" value={carbs} max={profile.carbsTarget} /><Ring label="Fat" value={fat} max={profile.fatTarget} /></div></section>
+      <section className="steps-mini-card"><div><p className="eyebrow">Today steps</p><strong>{stepsToday.toLocaleString()}</strong><span>goal {Math.min(100, Math.round((stepsToday / 8000) * 100))}%</span></div><button type="button" className="icon-chip" onClick={() => onTab("steps")} aria-label="Open steps"><Footprints size={17} /></button></section>
       <section className="score-card"><p className="eyebrow">Health Score</p><strong>{score.toFixed(1)}</strong><span>out of 10 based on today's meal and effort balance</span></section>
       <section><div className="section-title"><h3>Today's Logs</h3><button type="button" onClick={() => onTab("history")}>View all</button></div><div className="log-list">{logs.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>
-      <div className="quick-actions"><button type="button" className="primary-button" onClick={() => onTab("food")}><Plus size={17} /> Log meal</button><button type="button" className="secondary-button" onClick={() => onTab("workout")}><Dumbbell size={17} /> Workout</button></div>
+      <div className="quick-actions"><button type="button" className="primary-button" onClick={() => onTab("food")}><Plus size={17} /> Log meal</button><button type="button" className="secondary-button" onClick={() => onTab("steps")}><Footprints size={17} /> Steps</button></div>
     </div>
   );
 }
@@ -831,6 +996,69 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
       <section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section>
       <div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>
       {draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); setImageUrl(undefined); setImageFile(undefined); }} />}
+    </div>
+  );
+}
+
+function StepsScreen({ stepLogs, profile, onSave, onDelete }: { stepLogs: StepLog[]; profile: UserProfile; onSave: (entry: StepLog) => Promise<void> | void; onDelete: (id: string) => Promise<void> | void }) {
+  const [manualSteps, setManualSteps] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const counter = useStepCounter();
+  const todaysStepLogs = stepLogs.filter((log) => log.date === today);
+  const weekStepLogs = stepLogs.filter((log) => isWithinPeriod(log.date, "week"));
+  const todayTotal = todaysStepLogs.reduce((total, log) => total + log.steps, 0);
+  const weekTotal = weekStepLogs.reduce((total, log) => total + log.steps, 0);
+  const sessionDistance = estimateStepDistanceKm(counter.steps, profile);
+  const sessionCalories = estimateStepCalories(counter.steps, profile);
+  const manualDistance = estimateStepDistanceKm(manualSteps, profile);
+  const manualCalories = estimateStepCalories(manualSteps, profile);
+
+  async function saveSteps(source: "motion" | "manual") {
+    const steps = source === "motion" ? counter.steps : manualSteps;
+    if (!steps || steps < 1) return;
+    setSaving(true);
+    await onSave({
+      id: makeId("steps"),
+      title: source === "motion" ? "Motion step session" : "Manual step entry",
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      steps,
+      distanceKm: estimateStepDistanceKm(steps, profile),
+      calories: estimateStepCalories(steps, profile),
+      source,
+      date: today
+    });
+    if (source === "motion") counter.reset();
+    else setManualSteps(0);
+    setSaving(false);
+  }
+
+  return (
+    <div className="stack">
+      <section className="steps-hero">
+        <div><p className="eyebrow">Today steps</p><strong>{todayTotal.toLocaleString()}</strong><span>{Math.min(100, Math.round((todayTotal / 8000) * 100))}% of 8,000</span></div>
+        <div className="step-progress"><span style={{ width: `${Math.min(100, Math.round((todayTotal / 8000) * 100))}%` }} /></div>
+      </section>
+
+      <section className="step-session-card">
+        <div className="section-title"><h3>Motion Session</h3><span>{counter.tracking ? "Live" : "Paused"}</span></div>
+        <div className="step-session-main"><Footprints size={34} /><strong>{counter.steps.toLocaleString()}</strong><span>steps</span></div>
+        <div className="step-stat-grid"><span><b>{sessionDistance.toFixed(2)}</b>km</span><span><b>{sessionCalories}</b>kcal</span><span><b>{counter.signal.toFixed(1)}</b>signal</span></div>
+        <div className="step-actions">
+          <button type="button" className={counter.tracking ? "secondary-button" : "primary-button"} onClick={counter.tracking ? counter.stop : counter.start}>{counter.tracking ? "Pause" : "Start"}</button>
+          <button type="button" className="secondary-button" onClick={counter.reset}>Reset</button>
+        </div>
+        <button type="button" className="primary-button full" onClick={() => saveSteps("motion")} disabled={saving || counter.steps < 1}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}Save session</button>
+        <p className={counter.supported ? "support-note quiet" : "support-note"}>{counter.message}</p>
+      </section>
+
+      <section className="input-card">
+        <label htmlFor="manual-steps">Manual steps</label>
+        <input id="manual-steps" className="standalone-input" type="number" inputMode="numeric" min={0} value={manualSteps || ""} onChange={(event) => setManualSteps(Math.max(0, Number(event.target.value) || 0))} placeholder="Example: 6500" />
+        <div className="step-stat-grid compact"><span><b>{manualDistance.toFixed(2)}</b>km</span><span><b>{manualCalories}</b>kcal</span><span><b>{weekTotal.toLocaleString()}</b>week</span></div>
+        <button type="button" className="primary-button full" onClick={() => saveSteps("manual")} disabled={saving || manualSteps < 1}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}Save steps</button>
+      </section>
+
+      {stepLogs.length > 0 && <section><div className="section-title"><h3>Recent steps</h3><span>{stepLogs.length}</span></div><div className="log-list">{stepLogs.slice(0, 10).map((log) => <StepLogCard key={log.id} entry={log} onDelete={onDelete} />)}</div></section>}
     </div>
   );
 }
@@ -939,8 +1167,12 @@ function LogCard({ entry, onEdit }: { entry: LogEntry; onEdit: (entry: LogEntry)
   return <article className={hasPhoto ? "log-card with-photo" : "log-card"}>{hasPhoto ? <img className="meal-thumb" src={entry.imageUrl} alt={`${entry.title} ${entry.kind}`} /> : <div className={`log-icon ${iconClass}`}>{isFood ? <Utensils size={16} /> : isExpense ? <Wallet size={16} /> : <Dumbbell size={16} />}</div>}<div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{meta}</span></div><h4>{entry.title}</h4><p>{detail}</p></div><button type="button" className="edit-button" onClick={() => onEdit(entry)} aria-label={`Edit ${entry.title}`}><Pencil size={15} /></button></article>;
 }
 
+function StepLogCard({ entry, onDelete }: { entry: StepLog; onDelete: (id: string) => Promise<void> | void }) {
+  return <article className="log-card"><div className="log-icon steps"><Footprints size={16} /></div><div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{entry.source}</span></div><h4>{entry.title}</h4><p>{entry.steps.toLocaleString()} steps - {entry.distanceKm.toFixed(2)} km - {entry.calories} kcal</p></div><button type="button" className="edit-button" onClick={() => onDelete(entry.id)} aria-label={`Delete ${entry.title}`}><X size={15} /></button></article>;
+}
+
 function BottomNav({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {
-  const items: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [{ key: "home", label: "Home", icon: <Home size={17} /> }, { key: "food", label: "Food", icon: <Utensils size={17} /> }, { key: "workout", label: "Workout", icon: <Dumbbell size={17} /> }, { key: "expenses", label: "Spend", icon: <Wallet size={17} /> }, { key: "history", label: "History", icon: <BarChart3 size={17} /> }, { key: "profile", label: "Profile", icon: <User size={17} /> }];
+  const items: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [{ key: "home", label: "Home", icon: <Home size={16} /> }, { key: "food", label: "Food", icon: <Utensils size={16} /> }, { key: "workout", label: "Workout", icon: <Dumbbell size={16} /> }, { key: "steps", label: "Steps", icon: <Footprints size={16} /> }, { key: "expenses", label: "Spend", icon: <Wallet size={16} /> }, { key: "history", label: "History", icon: <BarChart3 size={16} /> }, { key: "profile", label: "Profile", icon: <User size={16} /> }];
   return <nav className="bottom-nav">{items.map((item) => <button type="button" key={item.key} className={active === item.key ? "active" : ""} onClick={() => onChange(item.key)}>{item.icon}<span>{item.label}</span></button>)}</nav>;
 }
 
