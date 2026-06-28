@@ -49,21 +49,32 @@ export async function callGeminiAnalysis<T>(
     return { analysis: options.mockFn(), provider: "mock" };
   }
 
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: options.parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: options.temperature ?? 0.2,
-        responseSchema: options.responseSchema
-      }
-    })
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: options.parts }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: options.temperature ?? 0.2,
+          responseSchema: options.responseSchema
+        }
+      })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Network request failed";
+    console.error("Failed to reach Gemini API:", message);
+    return {
+      analysis: options.mockFn(),
+      provider: "mock-fallback",
+      error: "Failed to reach Gemini API"
+    };
+  }
 
   if (!response.ok) {
-    const detail = await response.text();
+    const detail = await response.text().catch(() => "Unable to read error response");
     console.error(`${options.errorLabel} failed:`, response.status, detail);
     return {
       analysis: options.mockFn(),
@@ -72,11 +83,28 @@ export async function callGeminiAnalysis<T>(
     };
   }
 
-  const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  let data: Record<string, unknown>;
+  try {
+    data = await response.json();
+  } catch {
+    return {
+      analysis: options.mockFn(),
+      provider: "mock-fallback",
+      error: "Gemini returned invalid JSON"
+    };
+  }
+
+  const candidates = data.candidates as
+    | Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    | undefined;
+  const text = candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     return { analysis: options.mockFn(), provider: "mock-fallback" };
   }
 
-  return { analysis: parseGeminiJson<T>(text), provider: "gemini" };
+  try {
+    return { analysis: parseGeminiJson<T>(text), provider: "gemini" };
+  } catch {
+    return { analysis: options.mockFn(), provider: "mock-fallback" };
+  }
 }
