@@ -565,7 +565,15 @@ export default function KynexApp() {
     }
     if (showStatus) setSyncStatus("Saving profile...");
     let avatarPath = calculatedProfile.avatarPath;
-    if (avatarFile) avatarPath = await uploadFile("avatars", "avatar", avatarFile);
+    if (avatarFile) {
+      try {
+        avatarPath = await uploadFile("avatars", "avatar", avatarFile);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Avatar upload failed";
+        setSyncStatus(message);
+        return;
+      }
+    }
     const { error } = await supabase.from("profiles").upsert({
       id: user.id,
       display_name: calculatedProfile.displayName,
@@ -727,7 +735,14 @@ export default function KynexApp() {
     }
     setSyncStatus("Saving log...");
     if (entry.kind === "food") {
-      const imagePath = await uploadEntryImage(entry);
+      let imagePath: string | undefined;
+      try {
+        imagePath = await uploadEntryImage(entry);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Image upload failed";
+        setSyncStatus(message);
+        return;
+      }
       const { data, error } = await supabase.from("food_logs").insert({
         user_id: user.id,
         logged_at: loggedAtFromEntry(entry),
@@ -745,7 +760,14 @@ export default function KynexApp() {
       if (error) { setSyncStatus(error.message); return; }
       setLogs((current) => sortByDateTime([{ ...entry, id: data.id, imagePath }, ...current]));
     } else if (entry.kind === "workout") {
-      const imagePath = await uploadEntryImage(entry);
+      let imagePath: string | undefined;
+      try {
+        imagePath = await uploadEntryImage(entry);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Image upload failed";
+        setSyncStatus(message);
+        return;
+      }
       const { data, error } = await supabase.from("workout_logs").insert({
         user_id: user.id,
         logged_at: loggedAtFromEntry(entry),
@@ -944,7 +966,8 @@ function AuthScreen() {
 
   async function googleSignIn() {
     if (!supabase) return;
-    await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
+    const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
+    if (error) setMessage(error.message);
   }
 
   return (
@@ -985,14 +1008,22 @@ function FoodScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry:
 
   async function analyze() {
     setAnalyzing(true);
-    let imageDataUrl = "";
-    if (image.imageFile) imageDataUrl = await fileToDataUrl(image.imageFile);
-    const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
-    const data = await response.json();
-    setProvider(data.provider ?? "ai");
-    const analysis = data.analysis;
-    setDraft({ id: makeId("meal"), kind: "food", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), calories: analysis.calories, protein: analysis.protein, carbs: analysis.carbs, fat: analysis.fat, score: analysis.score, confidence: `${Math.round((analysis.confidence ?? 0.82) * 100)}%`, notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: image.imageFile ? "photo" : input ? "text" : "voice", date: today });
-    setAnalyzing(false);
+    try {
+      let imageDataUrl = "";
+      if (image.imageFile) imageDataUrl = await fileToDataUrl(image.imageFile);
+      const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
+      const data = await response.json();
+      setProvider(data.provider ?? "ai");
+      const analysis = data.analysis;
+      if (!analysis) throw new Error(data.error ?? "Analysis failed");
+      setDraft({ id: makeId("meal"), kind: "food", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), calories: analysis.calories, protein: analysis.protein, carbs: analysis.carbs, fat: analysis.fat, score: analysis.score, confidence: `${Math.round((analysis.confidence ?? 0.82) * 100)}%`, notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: image.imageFile ? "photo" : input ? "text" : "voice", date: today });
+    } catch (error) {
+      setProvider("error");
+      setDraft(null);
+      console.error("Food analysis failed:", error instanceof Error ? error.message : error);
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   return (
@@ -1014,12 +1045,20 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
 
   async function analyze() {
     setAnalyzing(true);
-    const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
-    const data = await response.json();
-    setProvider(data.provider ?? "ai");
-    const analysis = data.analysis;
-    setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: input ? "text" : "voice", date: today });
-    setAnalyzing(false);
+    try {
+      const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
+      const data = await response.json();
+      setProvider(data.provider ?? "ai");
+      const analysis = data.analysis;
+      if (!analysis) throw new Error(data.error ?? "Analysis failed");
+      setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: input ? "text" : "voice", date: today });
+    } catch (error) {
+      setProvider("error");
+      setDraft(null);
+      console.error("Workout analysis failed:", error instanceof Error ? error.message : error);
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   return (
@@ -1140,12 +1179,20 @@ function ExpenseScreen({ expenses, budget, onBudgetSave, onSave, onEdit }: { exp
 
   async function analyze() {
     setAnalyzing(true);
-    const response = await fetch("/api/analyze/expense", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input }) });
-    const data = await response.json();
-    setProvider(data.provider ?? "ai");
-    const analysis = data.analysis;
-    setDraft({ id: makeId("expense"), kind: "expense", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), amount: Number(analysis.amount ?? 0), currency: analysis.currency || "INR", category: analysis.category || "miscellaneous", merchant: analysis.merchant || "", confidence: `${Math.round((analysis.confidence ?? 0.65) * 100)}%`, notes: analysis.notes, source: input ? "text" : "voice", date: today });
-    setAnalyzing(false);
+    try {
+      const response = await fetch("/api/analyze/expense", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input }) });
+      const data = await response.json();
+      setProvider(data.provider ?? "ai");
+      const analysis = data.analysis;
+      if (!analysis) throw new Error(data.error ?? "Analysis failed");
+      setDraft({ id: makeId("expense"), kind: "expense", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), amount: Number(analysis.amount ?? 0), currency: analysis.currency || "INR", category: analysis.category || "miscellaneous", merchant: analysis.merchant || "", confidence: `${Math.round((analysis.confidence ?? 0.65) * 100)}%`, notes: analysis.notes, source: input ? "text" : "voice", date: today });
+    } catch (error) {
+      setProvider("error");
+      setDraft(null);
+      console.error("Expense analysis failed:", error instanceof Error ? error.message : error);
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   return (
@@ -1290,8 +1337,13 @@ function ProfileEditor({ mode, email, syncStatus, profile, onSave, onSignOut }: 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
-    await onSave({ ...calculated, avatarUrl: avatarPreview, avatarPath: profile.avatarPath }, avatarFile);
-    setSaving(false);
+    try {
+      await onSave({ ...calculated, avatarUrl: avatarPreview, avatarPath: profile.avatarPath }, avatarFile);
+    } catch (error) {
+      console.error("Profile save failed:", error instanceof Error ? error.message : error);
+    } finally {
+      setSaving(false);
+    }
   }
 
   const initials = (draft.displayName || email || "A").slice(0, 1).toUpperCase();
