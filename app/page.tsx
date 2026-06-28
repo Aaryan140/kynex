@@ -314,6 +314,26 @@ async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+function useImagePicker() {
+  const [imageUrl, setImageUrl] = useState<string | undefined>();
+  const [imageFile, setImageFile] = useState<File | undefined>();
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  function onImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    setImageUrl(URL.createObjectURL(file));
+  }
+
+  function clearImage() {
+    setImageUrl(undefined);
+    setImageFile(undefined);
+  }
+
+  return { imageUrl, imageFile, fileRef, onImage, clearImage };
+}
+
 function useSpeechInput(onTranscript: (value: string) => void) {
   const recognitionRef = useRef<InstanceType<SpeechRecognitionConstructor> | null>(null);
   const [listening, setListening] = useState(false);
@@ -528,13 +548,13 @@ export default function KynexApp() {
     setProfile(nextProfile);
   }
 
-  async function uploadAvatar(file: File) {
+  async function uploadFile(bucket: string, prefix: string, file: File) {
     if (!supabase || !user) return undefined;
     const extension = file.name.split(".").pop() || "jpg";
-    const avatarPath = `${user.id}/${Date.now()}-${makeId("avatar")}.${extension}`;
-    const { error } = await supabase.storage.from("avatars").upload(avatarPath, file, { upsert: false });
+    const filePath = `${user.id}/${Date.now()}-${makeId(prefix)}.${extension}`;
+    const { error } = await supabase.storage.from(bucket).upload(filePath, file, { upsert: false });
     if (error) throw error;
-    return avatarPath;
+    return filePath;
   }
 
   async function saveProfile(nextProfile: UserProfile, avatarFile?: File, showStatus = true) {
@@ -545,7 +565,7 @@ export default function KynexApp() {
     }
     if (showStatus) setSyncStatus("Saving profile...");
     let avatarPath = calculatedProfile.avatarPath;
-    if (avatarFile) avatarPath = await uploadAvatar(avatarFile);
+    if (avatarFile) avatarPath = await uploadFile("avatars", "avatar", avatarFile);
     const { error } = await supabase.from("profiles").upsert({
       id: user.id,
       display_name: calculatedProfile.displayName,
@@ -692,22 +712,11 @@ export default function KynexApp() {
     setSyncStatus("Cloud sync active.");
   }
 
-  async function uploadFoodImage(entry: MealLog) {
-    if (!supabase || !user || !entry.imageFile) return entry.imagePath;
-    const extension = entry.imageFile.name.split(".").pop() || "jpg";
-    const imagePath = `${user.id}/${Date.now()}-${makeId("meal")}.${extension}`;
-    const { error } = await supabase.storage.from("food-images").upload(imagePath, entry.imageFile, { upsert: false });
-    if (error) throw error;
-    return imagePath;
-  }
-
-  async function uploadWorkoutImage(entry: WorkoutLog) {
-    if (!supabase || !user || !entry.imageFile) return entry.imagePath;
-    const extension = entry.imageFile.name.split(".").pop() || "jpg";
-    const imagePath = `${user.id}/${Date.now()}-${makeId("workout")}.${extension}`;
-    const { error } = await supabase.storage.from("workout-images").upload(imagePath, entry.imageFile, { upsert: false });
-    if (error) throw error;
-    return imagePath;
+  async function uploadEntryImage(entry: MealLog | WorkoutLog) {
+    if (!entry.imageFile) return entry.imagePath;
+    const bucket = entry.kind === "food" ? "food-images" : "workout-images";
+    const prefix = entry.kind === "food" ? "meal" : "workout";
+    return await uploadFile(bucket, prefix, entry.imageFile) ?? entry.imagePath;
   }
 
   async function saveLog(entry: LogEntry) {
@@ -718,7 +727,7 @@ export default function KynexApp() {
     }
     setSyncStatus("Saving log...");
     if (entry.kind === "food") {
-      const imagePath = await uploadFoodImage(entry);
+      const imagePath = await uploadEntryImage(entry);
       const { data, error } = await supabase.from("food_logs").insert({
         user_id: user.id,
         logged_at: loggedAtFromEntry(entry),
@@ -736,7 +745,7 @@ export default function KynexApp() {
       if (error) { setSyncStatus(error.message); return; }
       setLogs((current) => sortByDateTime([{ ...entry, id: data.id, imagePath }, ...current]));
     } else if (entry.kind === "workout") {
-      const imagePath = await uploadWorkoutImage(entry);
+      const imagePath = await uploadEntryImage(entry);
       const { data, error } = await supabase.from("workout_logs").insert({
         user_id: user.id,
         logged_at: loggedAtFromEntry(entry),
@@ -968,38 +977,29 @@ function HomeScreen({ caloriesIn, caloriesOut, protein, carbs, fat, score, steps
 
 function FoodScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry: LogEntry) => void }) {
   const [input, setInput] = useState("");
-  const [imageUrl, setImageUrl] = useState<string | undefined>();
-  const [imageFile, setImageFile] = useState<File | undefined>();
   const [draft, setDraft] = useState<MealLog | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [provider, setProvider] = useState("");
-  const fileRef = useRef<HTMLInputElement | null>(null);
+  const image = useImagePicker();
   const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
-
-  function onImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setImageFile(file);
-    setImageUrl(URL.createObjectURL(file));
-  }
 
   async function analyze() {
     setAnalyzing(true);
     let imageDataUrl = "";
-    if (imageFile) imageDataUrl = await fileToDataUrl(imageFile);
+    if (image.imageFile) imageDataUrl = await fileToDataUrl(image.imageFile);
     const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
-    setDraft({ id: makeId("meal"), kind: "food", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), calories: analysis.calories, protein: analysis.protein, carbs: analysis.carbs, fat: analysis.fat, score: analysis.score, confidence: `${Math.round((analysis.confidence ?? 0.82) * 100)}%`, notes: analysis.notes, imageUrl, imageFile, source: imageFile ? "photo" : input ? "text" : "voice", date: today });
+    setDraft({ id: makeId("meal"), kind: "food", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), calories: analysis.calories, protein: analysis.protein, carbs: analysis.carbs, fat: analysis.fat, score: analysis.score, confidence: `${Math.round((analysis.confidence ?? 0.82) * 100)}%`, notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: image.imageFile ? "photo" : input ? "text" : "voice", date: today });
     setAnalyzing(false);
   }
 
   return (
     <div className="stack">
-      <section className="capture-card"><div className="capture-preview">{imageUrl ? <img src={imageUrl} alt="Selected meal" /> : <><Camera size={36} /><span>Scan meal</span></>}</div><div className="capture-actions"><input ref={fileRef} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={onImage} /><button type="button" className="primary-button" onClick={() => fileRef.current?.click()}><ImagePlus size={17} /> Photo</button><button type="button" className={speech.listening ? "voice-button listening" : "voice-button"} onClick={speech.toggle}><Mic size={17} /> {speech.listening ? "Listening" : "Speak"}</button></div>{!speech.supported && <p className="support-note">Speech input is not available in this browser.</p>}</section>
+      <section className="capture-card"><div className="capture-preview">{image.imageUrl ? <img src={image.imageUrl} alt="Selected meal" /> : <><Camera size={36} /><span>Scan meal</span></>}</div><div className="capture-actions"><input ref={image.fileRef} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={image.onImage} /><button type="button" className="primary-button" onClick={() => image.fileRef.current?.click()}><ImagePlus size={17} /> Photo</button><button type="button" className={speech.listening ? "voice-button listening" : "voice-button"} onClick={speech.toggle}><Mic size={17} /> {speech.listening ? "Listening" : "Speak"}</button></div>{!speech.supported && <p className="support-note">Speech input is not available in this browser.</p>}</section>
       <section className="input-card"><label htmlFor="food-input">Describe meal</label><textarea id="food-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: sourdough toast, avocado, poached egg..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze food"}</button></section>
-      {draft && <ReviewMeal draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); setImageUrl(undefined); setImageFile(undefined); }} />}
+      {draft && <ReviewMeal draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); image.clearImage(); }} />}
     </div>
   );
 }
@@ -1009,17 +1009,8 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
   const [draft, setDraft] = useState<WorkoutLog | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [provider, setProvider] = useState("");
-  const [imageUrl, setImageUrl] = useState<string | undefined>();
-  const [imageFile, setImageFile] = useState<File | undefined>();
-  const fileRef = useRef<HTMLInputElement | null>(null);
+  const image = useImagePicker();
   const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
-
-  function onImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setImageFile(file);
-    setImageUrl(URL.createObjectURL(file));
-  }
 
   async function analyze() {
     setAnalyzing(true);
@@ -1027,23 +1018,23 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
-    setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, imageUrl, imageFile, source: input ? "text" : "voice", date: today });
+    setDraft({ id: makeId("workout"), kind: "workout", title: analysis.title, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), duration: analysis.duration, calories: analysis.calories, effort: analysis.effort, score: analysis.score, movements: analysis.movements ?? [], notes: analysis.notes, imageUrl: image.imageUrl, imageFile: image.imageFile, source: input ? "text" : "voice", date: today });
     setAnalyzing(false);
   }
 
   return (
     <div className="stack">
       <section className="capture-card workout-capture">
-        <div className="capture-preview">{imageUrl ? <img src={imageUrl} alt="Workout progress" /> : <><Camera size={34} /><span>Progress photo</span></>}</div>
+        <div className="capture-preview">{image.imageUrl ? <img src={image.imageUrl} alt="Workout progress" /> : <><Camera size={34} /><span>Progress photo</span></>}</div>
         <div className="capture-actions">
-          <input ref={fileRef} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={onImage} />
-          <button type="button" className="secondary-button" onClick={() => fileRef.current?.click()}><ImagePlus size={17} /> Add image</button>
-          {imageUrl && <button type="button" className="voice-button" onClick={() => { setImageUrl(undefined); setImageFile(undefined); }}>Remove</button>}
+          <input ref={image.fileRef} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={image.onImage} />
+          <button type="button" className="secondary-button" onClick={() => image.fileRef.current?.click()}><ImagePlus size={17} /> Add image</button>
+          {image.imageUrl && <button type="button" className="voice-button" onClick={image.clearImage}>Remove</button>}
         </div>
       </section>
       <section className="input-card"><div className="input-heading"><label htmlFor="workout-input">Quantify your output</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="workout-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: 45 min strength training, squats, rows, walking lunges..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze workout"}</button></section>
       <div className="workout-preset-grid">{["Strength", "Run", "Walk", "Yoga"].map((preset) => <button type="button" key={preset} onClick={() => setInput(preset)}>{preset}</button>)}</div>
-      {draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); setImageUrl(undefined); setImageFile(undefined); }} />}
+      {draft && <ReviewWorkout draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); image.clearImage(); }} />}
     </div>
   );
 }
