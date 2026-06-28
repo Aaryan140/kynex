@@ -1,39 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { categories, mockExpenseAnalysis, parseExpenseJson } from "../../../../lib/analyzers/expense";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
-
-type ExpenseAnalysis = {
-  title: string;
-  amount: number;
-  currency: string;
-  category: string;
-  merchant: string;
-  confidence: number;
-  notes: string;
-};
-
-const categories = ["food", "groceries", "transport", "shopping", "health", "fitness", "bills", "entertainment", "travel", "education", "miscellaneous"];
-
-function mockExpenseAnalysis(prompt: string): ExpenseAnalysis {
-  const lower = prompt.toLowerCase();
-  const amount = Number(lower.match(/(?:rs|inr|\$)?\s*(\d+(?:\.\d+)?)/)?.[1] ?? 0);
-  const category = lower.includes("uber") || lower.includes("metro") || lower.includes("cab") ? "transport" : lower.includes("coffee") || lower.includes("lunch") || lower.includes("dinner") ? "food" : lower.includes("gym") ? "fitness" : "miscellaneous";
-  return {
-    title: prompt.trim() || "New expense",
-    amount,
-    currency: lower.includes("$") ? "USD" : "INR",
-    category,
-    merchant: "",
-    confidence: amount ? 0.72 : 0.45,
-    notes: "Fallback estimate. Edit amount/category before saving."
-  };
-}
-
-function parseJson(text: string): ExpenseAnalysis {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(cleaned) as ExpenseAnalysis;
-}
 
 export async function POST(request: NextRequest) {
   const { prompt = "" } = await request.json();
@@ -95,7 +64,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ analysis: mockExpenseAnalysis(prompt), provider: "mock-fallback" });
   }
 
-  const analysis = parseJson(text);
+  const analysis = parseExpenseJson(text);
   if (!categories.includes(analysis.category)) analysis.category = "miscellaneous";
   const lowerPrompt = prompt.toLowerCase();
   if (!lowerPrompt.includes("$") && !lowerPrompt.includes("usd") && !lowerPrompt.includes("dollar")) {

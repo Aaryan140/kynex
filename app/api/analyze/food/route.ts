@@ -1,37 +1,8 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
+import { mockFoodAnalysis, parseFoodJson } from "../../../../lib/analyzers/food";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
-
-type FoodAnalysis = {
-  title: string;
-  calories: number;
-  protein: number;
-  carbs: number;
-  fat: number;
-  score: number;
-  confidence: number;
-  notes: string;
-};
-
-function mockFoodAnalysis(prompt: string): FoodAnalysis {
-  const lower = prompt.toLowerCase();
-  return {
-    title: prompt.trim() || "Smashed avocado & egg",
-    calories: lower.includes("salad") ? 330 : lower.includes("rice") ? 620 : 412,
-    protein: lower.includes("whey") ? 38 : lower.includes("chicken") ? 46 : 18,
-    carbs: lower.includes("rice") ? 58 : 32,
-    fat: lower.includes("fried") ? 30 : 24,
-    score: lower.includes("fried") ? 6.4 : 8.8,
-    confidence: 0.82,
-    notes: "Demo estimate. Add a Gemini API key for live AI analysis."
-  };
-}
-
-function parseJson(text: string): FoodAnalysis {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(cleaned) as FoodAnalysis;
-}
 
 export async function POST(request: NextRequest) {
   const { prompt = "", imageDataUrl = "", profile = {} } = await request.json();
@@ -109,5 +80,5 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ analysis: mockFoodAnalysis(prompt), provider: "mock-fallback" });
   }
 
-  return NextResponse.json({ analysis: parseJson(text), provider: "gemini" });
+  return NextResponse.json({ analysis: parseFoodJson(text), provider: "gemini" });
 }

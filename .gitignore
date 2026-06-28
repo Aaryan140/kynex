@@ -12,3 +12,4 @@ pnpm-debug.log*
 .chrome-*/
 kynex-*-preview.png
 kynex-demo-home.png
+tsconfig.tsbuildinfo
