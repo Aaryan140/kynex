@@ -1,30 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callGeminiAnalysis, serializeProfile } from "../../../../lib/gemini";
-
-type FoodAnalysis = {
-  title: string;
-  calories: number;
-  protein: number;
-  carbs: number;
-  fat: number;
-  score: number;
-  confidence: number;
-  notes: string;
-};
-
-function mockFoodAnalysis(prompt: string): FoodAnalysis {
-  const lower = prompt.toLowerCase();
-  return {
-    title: prompt.trim() || "Smashed avocado & egg",
-    calories: lower.includes("salad") ? 330 : lower.includes("rice") ? 620 : 412,
-    protein: lower.includes("whey") ? 38 : lower.includes("chicken") ? 46 : 18,
-    carbs: lower.includes("rice") ? 58 : 32,
-    fat: lower.includes("fried") ? 30 : 24,
-    score: lower.includes("fried") ? 6.4 : 8.8,
-    confidence: 0.82,
-    notes: "Demo estimate. Add a Gemini API key for live AI analysis."
-  };
-}
+import { FoodAnalysis, mockFoodAnalysis } from "../../../../lib/analyzers/food";
 
 const RESPONSE_SCHEMA = {
   type: "OBJECT",

@@ -25,8 +25,22 @@ import {
   X
 } from "lucide-react";
 import { Session } from "@supabase/supabase-js";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import {
+  calculateTargets,
+  defaultProfile,
+  defaultExpenseBudget,
+  withCalculatedTargets,
+  isProfileComplete,
+  labelFromValue,
+  yesterday,
+  isWithinPeriod,
+  makeId,
+  estimateStepDistanceKm,
+  estimateStepCalories
+} from "../lib/utils";
+import type { UserProfile, ExpenseBudgetSettings } from "../lib/utils";
 
 type Tab = "home" | "food" | "workout" | "steps" | "expenses" | "history" | "profile";
 type SourceMode = "photo" | "voice" | "text";
@@ -84,6 +98,7 @@ type ExpenseLog = {
 };
 
 type StepLog = {
+  kind: "steps";
   id: string;
   title: string;
   time: string;
@@ -95,24 +110,10 @@ type StepLog = {
 };
 
 type LogEntry = MealLog | WorkoutLog | ExpenseLog;
+type EditableLogEntry = LogEntry | StepLog;
+type ExpenseWarningLevel = "30" | "10" | "over";
 
-type UserProfile = {
-  displayName: string;
-  avatarUrl?: string;
-  avatarPath?: string;
-  age: number;
-  sex: string;
-  heightCm: number;
-  weightKg: number;
-  goal: string;
-  trainingLevel: string;
-  activityLevel: string;
-  dailyCalorieTarget: number;
-  proteinTarget: number;
-  carbsTarget: number;
-  fatTarget: number;
-  completedAt?: string;
-};
+
 
 type SpeechRecognitionConstructor = new () => {
   continuous: boolean;
@@ -139,65 +140,77 @@ declare global {
 
 const today = new Date().toISOString().slice(0, 10);
 const supabase = getSupabaseBrowserClient();
-
-function defaultProfile(email?: string | null): UserProfile {
-  const base = calculateTargets({
-    age: 0,
-    sex: "",
-    heightCm: 0,
-    weightKg: 0,
-    goal: "recomposition",
-    activityLevel: "moderate"
-  });
-  return {
-    displayName: email?.split("@")[0] || "KYNEX athlete",
-    age: 0,
-    sex: "",
-    heightCm: 0,
-    weightKg: 0,
-    goal: "recomposition",
-    trainingLevel: "intermediate",
-    activityLevel: "moderate",
-    dailyCalorieTarget: base.calories,
-    proteinTarget: base.protein,
-    carbsTarget: base.carbs,
-    fatTarget: base.fat
-  };
+function monthKeyFromDate(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function calculateTargets(profile: Pick<UserProfile, "age" | "sex" | "heightCm" | "weightKg" | "goal" | "activityLevel">) {
-  const weight = Math.max(0, Number(profile.weightKg) || 0);
-  const height = Math.max(0, Number(profile.heightCm) || 0);
-  const age = Math.max(0, Number(profile.age) || 0);
-  const sexOffset = profile.sex === "female" ? -161 : profile.sex === "male" ? 5 : -78;
-  const bmr = weight && height && age ? 10 * weight + 6.25 * height - 5 * age + sexOffset : 2200 / 1.45;
-  const activityMultipliers: Record<string, number> = { sedentary: 1.2, light: 1.375, moderate: 1.55, high: 1.725, athlete: 1.9 };
-  const goalAdjustments: Record<string, number> = { fat_loss: -450, recomposition: -150, maintain: 0, muscle_gain: 300, performance: 200 };
-  const calories = Math.max(1200, Math.round(((bmr * (activityMultipliers[profile.activityLevel] ?? 1.55)) + (goalAdjustments[profile.goal] ?? 0)) / 25) * 25);
-  const proteinPerKg = profile.goal === "muscle_gain" || profile.goal === "recomposition" ? 1.9 : profile.goal === "fat_loss" ? 2 : 1.6;
-  const protein = Math.max(60, Math.round((weight || 78) * proteinPerKg));
-  const fat = Math.max(40, Math.round(((calories * 0.27) / 9)));
-  const carbs = Math.max(80, Math.round((calories - protein * 4 - fat * 9) / 4));
-  return { calories, protein, carbs, fat };
+function previousMonthKey(date = new Date()) {
+  const value = new Date(date);
+  value.setMonth(value.getMonth() - 1);
+  return monthKeyFromDate(value);
 }
 
-function withCalculatedTargets(profile: UserProfile): UserProfile {
-  const targets = calculateTargets(profile);
-  return {
-    ...profile,
-    dailyCalorieTarget: targets.calories,
-    proteinTarget: targets.protein,
-    carbsTarget: targets.carbs,
-    fatTarget: targets.fat
-  };
+function dateBelongsToMonth(date: string, monthKey: string) {
+  return date.startsWith(`${monthKey}-`);
 }
 
-function isProfileComplete(profile: UserProfile) {
-  return Boolean(profile.completedAt && profile.age && profile.sex && profile.heightCm && profile.weightKg && profile.goal && profile.activityLevel && profile.trainingLevel);
+function monthLabel(monthKey: string) {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString([], { month: "long", year: "numeric" });
 }
 
-function labelFromValue(value: string) {
-  return value.split("_").map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
+function getMonthGrid(monthKey = monthKeyFromDate()) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const firstDay = new Date(year, month - 1, 1);
+  const totalDays = new Date(year, month, 0).getDate();
+  const leadingDays = firstDay.getDay();
+  const days: Array<string | null> = Array.from({ length: leadingDays }, () => null);
+  for (let day = 1; day <= totalDays; day += 1) {
+    days.push(`${monthKey}-${String(day).padStart(2, "0")}`);
+  }
+  return days;
+}
+
+function timeInputFromLabel(value: string) {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?:\s?([AP]M))?$/i);
+  if (!match) return "12:00";
+  let hour = Number(match[1]);
+  const minute = match[2];
+  const meridiem = match[3]?.toUpperCase();
+  if (meridiem === "PM" && hour < 12) hour += 12;
+  if (meridiem === "AM" && hour === 12) hour = 0;
+  return `${String(hour).padStart(2, "0")}:${minute}`;
+}
+
+function timeLabelFromInput(value: string) {
+  if (!value) return "12:00 PM";
+  return new Date(`2000-01-01T${value}:00`).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function loggedAtFromEntry(entry: EditableLogEntry) {
+  return new Date(`${entry.date}T${timeInputFromLabel(entry.time)}:00`).toISOString();
+}
+
+function sortByDateTime<T extends { date: string; time: string }>(items: T[]) {
+  return [...items].sort((a, b) => `${b.date} ${timeInputFromLabel(b.time)}`.localeCompare(`${a.date} ${timeInputFromLabel(a.time)}`));
+}
+
+function warningKey(monthKey: string, level: ExpenseWarningLevel) {
+  return `${monthKey}:${level}`;
+}
+
+function getExpenseBudgetSnapshot(expenses: ExpenseLog[], settings: ExpenseBudgetSettings) {
+  const currentMonth = monthKeyFromDate();
+  const priorMonth = previousMonthKey();
+  const limit = Math.max(0, Number(settings.monthlyLimit) || 0);
+  const currentSpent = expenses.filter((expense) => dateBelongsToMonth(expense.date, currentMonth)).reduce((sum, expense) => sum + expense.amount, 0);
+  const previousSpent = expenses.filter((expense) => dateBelongsToMonth(expense.date, priorMonth)).reduce((sum, expense) => sum + expense.amount, 0);
+  const carriedOver = limit > 0 ? Math.max(0, previousSpent - limit) : 0;
+  const effectiveLimit = Math.max(0, limit - carriedOver);
+  const remaining = effectiveLimit - currentSpent;
+  const percentLeft = effectiveLimit > 0 ? remaining / effectiveLimit : 0;
+  const level: ExpenseWarningLevel | null = !settings.enabled || limit <= 0 ? null : remaining < 0 || (effectiveLimit <= 0 && carriedOver > 0) ? "over" : percentLeft <= 0.1 ? "10" : percentLeft <= 0.3 ? "30" : null;
+  return { currentMonth, priorMonth, limit, currentSpent, previousSpent, carriedOver, effectiveLimit, remaining, percentLeft, level };
 }
 
 const expenseCategoryOptions: Array<[string, string]> = [
@@ -213,23 +226,6 @@ const expenseCategoryOptions: Array<[string, string]> = [
   ["education", "Education"],
   ["miscellaneous", "Miscellaneous"]
 ];
-
-function yesterday() {
-  const value = new Date();
-  value.setDate(value.getDate() - 1);
-  return value.toISOString().slice(0, 10);
-}
-
-function isWithinPeriod(date: string, period: "day" | "week" | "month") {
-  const now = new Date();
-  const value = new Date(`${date}T12:00:00`);
-  if (period === "day") return date === today;
-  if (period === "month") return value.getFullYear() === now.getFullYear() && value.getMonth() === now.getMonth();
-  const start = new Date(now);
-  start.setDate(now.getDate() - now.getDay());
-  start.setHours(0, 0, 0, 0);
-  return value >= start;
-}
 
 const starterLogs: LogEntry[] = [
   {
@@ -305,23 +301,8 @@ const starterLogs: LogEntry[] = [
   }
 ];
 
-function makeId(prefix: string) {
-  return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 function toClock(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function estimateStepDistanceKm(steps: number, profile: UserProfile) {
-  const heightMeters = Math.max(1.4, (Number(profile.heightCm) || 170) / 100);
-  const strideMeters = heightMeters * 0.415;
-  return Math.round((steps * strideMeters / 1000) * 100) / 100;
-}
-
-function estimateStepCalories(steps: number, profile: UserProfile) {
-  const weight = Math.max(45, Number(profile.weightKg) || 75);
-  return Math.round(steps * weight * 0.00053);
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -485,13 +466,16 @@ export default function KynexApp() {
   const [tab, setTab] = useState<Tab>("home");
   const [logs, setLogs] = useState<LogEntry[]>(starterLogs);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
-  const [editing, setEditing] = useState<LogEntry | null>(null);
+  const [editing, setEditing] = useState<EditableLogEntry | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<UserProfile>(() => defaultProfile());
   const [authReady, setAuthReady] = useState(!supabase);
+  const [navHidden, setNavHidden] = useState(false);
   const [syncStatus, setSyncStatus] = useState(
     supabase ? "Connect Supabase to sync logs." : "Demo mode: add Supabase keys to enable cloud sync."
   );
+  const lastScrollTopRef = useRef(0);
+  const navRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const user = session?.user ?? null;
 
@@ -554,6 +538,11 @@ export default function KynexApp() {
       proteinTarget: Number(row.protein_target_g ?? fallback.proteinTarget),
       carbsTarget: Number(row.carbs_target_g ?? fallback.carbsTarget),
       fatTarget: Number(row.fat_target_g ?? fallback.fatTarget),
+      expenseBudget: {
+        enabled: Boolean(row.expense_budget_enabled ?? fallback.expenseBudget.enabled),
+        monthlyLimit: Number(row.monthly_expense_budget ?? fallback.expenseBudget.monthlyLimit),
+        dismissedWarnings: Array.isArray(row.expense_budget_dismissed_warnings) ? row.expense_budget_dismissed_warnings : fallback.expenseBudget.dismissedWarnings
+      },
       completedAt: row.profile_completed_at ?? undefined
     };
     setProfile(nextProfile);
@@ -592,6 +581,9 @@ export default function KynexApp() {
       protein_target_g: calculatedProfile.proteinTarget || null,
       carbs_target_g: calculatedProfile.carbsTarget || null,
       fat_target_g: calculatedProfile.fatTarget || null,
+      expense_budget_enabled: calculatedProfile.expenseBudget.enabled,
+      monthly_expense_budget: calculatedProfile.expenseBudget.monthlyLimit || 0,
+      expense_budget_dismissed_warnings: calculatedProfile.expenseBudget.dismissedWarnings,
       profile_completed_at: calculatedProfile.completedAt,
       updated_at: new Date().toISOString()
     });
@@ -603,6 +595,25 @@ export default function KynexApp() {
     }
     setProfile({ ...calculatedProfile, avatarPath, avatarUrl });
     if (showStatus) setSyncStatus("Profile saved.");
+  }
+
+  async function saveExpenseBudget(settings: ExpenseBudgetSettings) {
+    const nextProfile = { ...profile, expenseBudget: settings };
+    setProfile(nextProfile);
+    if (!supabase || !user) return;
+    setSyncStatus("Saving budget settings...");
+    const { error } = await supabase.from("profiles").upsert({
+      id: user.id,
+      expense_budget_enabled: settings.enabled,
+      monthly_expense_budget: settings.monthlyLimit || 0,
+      expense_budget_dismissed_warnings: settings.dismissedWarnings,
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      setSyncStatus(error.message);
+      return;
+    }
+    setSyncStatus("Budget settings saved.");
   }
 
   async function loadCloudLogs(userId: string) {
@@ -686,6 +697,7 @@ export default function KynexApp() {
       date: row.logged_at.slice(0, 10)
     } satisfies ExpenseLog));
     const cloudStepLogs = (steps ?? []).map((row) => ({
+      kind: "steps" as const,
       id: row.id,
       title: row.title,
       time: toClock(row.logged_at),
@@ -695,8 +707,8 @@ export default function KynexApp() {
       source: row.source,
       date: row.logged_at.slice(0, 10)
     } satisfies StepLog));
-    setLogs([...foodLogs, ...workoutLogs, ...expenseLogs].sort((a, b) => (a.date < b.date ? 1 : -1)));
-    setStepLogs(cloudStepLogs);
+    setLogs(sortByDateTime([...foodLogs, ...workoutLogs, ...expenseLogs]));
+    setStepLogs(sortByDateTime(cloudStepLogs));
     setSyncStatus("Cloud sync active.");
   }
 
@@ -709,7 +721,7 @@ export default function KynexApp() {
 
   async function saveLog(entry: LogEntry) {
     if (!supabase || !user) {
-      setLogs((current) => [{ ...entry, id: makeId(entry.kind) }, ...current]);
+      setLogs((current) => sortByDateTime([{ ...entry, id: makeId(entry.kind) }, ...current]));
       setTab("home");
       return;
     }
@@ -718,6 +730,7 @@ export default function KynexApp() {
       const imagePath = await uploadEntryImage(entry);
       const { data, error } = await supabase.from("food_logs").insert({
         user_id: user.id,
+        logged_at: loggedAtFromEntry(entry),
         title: entry.title,
         source: entry.source,
         image_path: imagePath,
@@ -730,11 +743,12 @@ export default function KynexApp() {
         ai_raw: { notes: entry.notes }
       }).select().single();
       if (error) { setSyncStatus(error.message); return; }
-      setLogs((current) => [{ ...entry, id: data.id, imagePath }, ...current]);
+      setLogs((current) => sortByDateTime([{ ...entry, id: data.id, imagePath }, ...current]));
     } else if (entry.kind === "workout") {
       const imagePath = await uploadEntryImage(entry);
       const { data, error } = await supabase.from("workout_logs").insert({
         user_id: user.id,
+        logged_at: loggedAtFromEntry(entry),
         title: entry.title,
         source: entry.source,
         image_path: imagePath,
@@ -746,10 +760,11 @@ export default function KynexApp() {
         ai_raw: { notes: entry.notes }
       }).select().single();
       if (error) { setSyncStatus(error.message); return; }
-      setLogs((current) => [{ ...entry, id: data.id, imagePath }, ...current]);
+      setLogs((current) => sortByDateTime([{ ...entry, id: data.id, imagePath }, ...current]));
     } else {
       const { data, error } = await supabase.from("expense_logs").insert({
         user_id: user.id,
+        logged_at: loggedAtFromEntry(entry),
         title: entry.title,
         amount: entry.amount,
         currency: entry.currency,
@@ -760,7 +775,7 @@ export default function KynexApp() {
         ai_raw: { notes: entry.notes }
       }).select().single();
       if (error) { setSyncStatus(error.message); return; }
-      setLogs((current) => [{ ...entry, id: data.id }, ...current]);
+      setLogs((current) => sortByDateTime([{ ...entry, id: data.id }, ...current]));
     }
     setSyncStatus("Saved to Supabase.");
     setTab("home");
@@ -771,15 +786,37 @@ export default function KynexApp() {
       setSyncStatus("Saving changes...");
       const table = updated.kind === "food" ? "food_logs" : updated.kind === "workout" ? "workout_logs" : "expense_logs";
       const payload = updated.kind === "food"
-        ? { title: updated.title, calories: updated.calories, protein_g: updated.protein, carbs_g: updated.carbs, fat_g: updated.fat, score: updated.score, updated_at: new Date().toISOString() }
+        ? { logged_at: loggedAtFromEntry(updated), title: updated.title, source: updated.source, calories: updated.calories, protein_g: updated.protein, carbs_g: updated.carbs, fat_g: updated.fat, score: updated.score, confidence: Number.parseFloat(updated.confidence) / 100 || null, ai_raw: { notes: updated.notes }, updated_at: new Date().toISOString() }
         : updated.kind === "workout"
-          ? { title: updated.title, duration_minutes: updated.duration, calories_burned: updated.calories, effort: updated.effort, score: updated.score, updated_at: new Date().toISOString() }
-          : { title: updated.title, amount: updated.amount, currency: updated.currency, category: updated.category || "miscellaneous", merchant: updated.merchant || null, updated_at: new Date().toISOString() };
+          ? { logged_at: loggedAtFromEntry(updated), title: updated.title, source: updated.source, duration_minutes: updated.duration, calories_burned: updated.calories, effort: updated.effort, movements: updated.movements, score: updated.score, ai_raw: { notes: updated.notes }, updated_at: new Date().toISOString() }
+          : { logged_at: loggedAtFromEntry(updated), title: updated.title, amount: updated.amount, currency: updated.currency, category: updated.category || "miscellaneous", merchant: updated.merchant || null, source: updated.source, confidence: Number.parseFloat(updated.confidence) / 100 || null, ai_raw: { notes: updated.notes }, updated_at: new Date().toISOString() };
       const { error } = await supabase.from(table).update(payload).eq("id", updated.id).eq("user_id", user.id);
       if (error) { setSyncStatus(error.message); return; }
       setSyncStatus("Changes saved.");
     }
-    setLogs((current) => current.map((log) => (log.id === updated.id ? updated : log)));
+    setLogs((current) => sortByDateTime(current.map((log) => (log.id === updated.id ? updated : log))));
+    setEditing(null);
+  }
+
+  async function updateStepLog(updated: StepLog) {
+    if (supabase && user) {
+      setSyncStatus("Saving step changes...");
+      const { error } = await supabase.from("step_logs").update({
+        logged_at: loggedAtFromEntry(updated),
+        title: updated.title,
+        steps: updated.steps,
+        distance_km: updated.distanceKm,
+        calories: updated.calories,
+        source: updated.source,
+        updated_at: new Date().toISOString()
+      }).eq("id", updated.id).eq("user_id", user.id);
+      if (error) {
+        setSyncStatus(error.message);
+        return;
+      }
+      setSyncStatus("Step changes saved.");
+    }
+    setStepLogs((current) => sortByDateTime(current.map((log) => (log.id === updated.id ? updated : log))));
     setEditing(null);
   }
 
@@ -798,12 +835,13 @@ export default function KynexApp() {
 
   async function saveStepLog(entry: StepLog) {
     if (!supabase || !user) {
-      setStepLogs((current) => [{ ...entry, id: makeId("steps") }, ...current]);
+      setStepLogs((current) => sortByDateTime([{ ...entry, id: makeId("steps") }, ...current]));
       return;
     }
     setSyncStatus("Saving steps...");
     const { data, error } = await supabase.from("step_logs").insert({
       user_id: user.id,
+      logged_at: loggedAtFromEntry(entry),
       title: entry.title,
       steps: entry.steps,
       distance_km: entry.distanceKm,
@@ -811,7 +849,7 @@ export default function KynexApp() {
       source: entry.source
     }).select().single();
     if (error) { setSyncStatus(error.message); return; }
-    setStepLogs((current) => [{ ...entry, id: data.id, time: toClock(data.logged_at), date: data.logged_at.slice(0, 10) }, ...current]);
+    setStepLogs((current) => sortByDateTime([{ ...entry, id: data.id, time: toClock(data.logged_at), date: data.logged_at.slice(0, 10) }, ...current]));
     setSyncStatus("Steps saved.");
   }
 
@@ -839,30 +877,40 @@ export default function KynexApp() {
   const scoredLogs = [...meals, ...workouts];
   const score = scoredLogs.length ? scoredLogs.reduce((total, log) => total + log.score, 0) / scoredLogs.length : 0;
 
+  function handleContentScroll(event: UIEvent<HTMLDivElement>) {
+    const currentTop = event.currentTarget.scrollTop;
+    const previousTop = lastScrollTopRef.current;
+    if (navRevealTimerRef.current) clearTimeout(navRevealTimerRef.current);
+    if (currentTop > previousTop + 6 && currentTop > 24) setNavHidden(true);
+    if (currentTop < previousTop - 6 || currentTop < 12) setNavHidden(false);
+    navRevealTimerRef.current = setTimeout(() => setNavHidden(false), 900);
+    lastScrollTopRef.current = currentTop;
+  }
+
   if (!authReady) return <LoadingShell />;
 
   return (
     <main className="app-shell">
       <section className="phone-frame">
         <Header tab={tab} userEmail={user?.email ?? null} syncStatus={syncStatus} />
-        <div className="screen-content">
+        <div className="screen-content" onScroll={handleContentScroll}>
           {supabase && !user ? <AuthScreen /> : user && !isProfileComplete(profile) ? <ProfileSetupScreen email={user.email} profile={profile} onSave={saveProfile} /> : <>
             {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} stepsToday={stepsToday} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
             {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
             {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
-            {tab === "steps" && <StepsScreen stepLogs={stepLogs} profile={profile} onSave={saveStepLog} onDelete={deleteStepLog} />}
-            {tab === "expenses" && <ExpenseScreen expenses={expenses} onSave={saveLog} onEdit={setEditing} />}
+            {tab === "steps" && <StepsScreen stepLogs={stepLogs} profile={profile} onSave={saveStepLog} onEdit={setEditing} />}
+            {tab === "expenses" && <ExpenseScreen expenses={expenses} budget={profile.expenseBudget} onBudgetSave={saveExpenseBudget} onSave={saveLog} onEdit={setEditing} />}
             {tab === "history" && <HistoryScreen logs={logs} onEdit={setEditing} />}
             {tab === "profile" && <ProfileScreen session={session} syncStatus={syncStatus} profile={profile} onSave={saveProfile} />}
           </>}
         </div>
-        {(!supabase || (user && isProfileComplete(profile))) && <BottomNav active={tab} onChange={setTab} />}
+        {(!supabase || (user && isProfileComplete(profile))) && <BottomNav active={tab} hidden={navHidden} onChange={(nextTab) => { setNavHidden(false); setTab(nextTab); }} />}
       </section>
       <aside className="desktop-panel">
         <div><p className="eyebrow">KYNEX MVP</p><h1>AI-powered fuel and effort tracking.</h1><p>Real AI analysis now uses your profile for better calorie and effort estimates while Supabase keeps logs, steps, and avatar data private.</p></div>
         <div className="desktop-grid"><Metric label="Calories in" value={caloriesIn.toLocaleString()} tone="green" /><Metric label="Burned" value={caloriesOut.toLocaleString()} tone="gold" /><Metric label="Steps" value={stepsToday.toLocaleString()} tone="green" /><Metric label="Readiness" value={`${score.toFixed(1)}`} tone="gold" /></div>
       </aside>
-      {editing && <EditSheet entry={editing} onClose={() => setEditing(null)} onSave={updateLog} onDelete={deleteLog} />}
+      {editing && <EditSheet entry={editing} onClose={() => setEditing(null)} onSave={(entry) => entry.kind === "steps" ? updateStepLog(entry) : updateLog(entry)} onDelete={(id) => editing.kind === "steps" ? deleteStepLog(id) : deleteLog(id)} />}
     </main>
   );
 }
@@ -991,7 +1039,7 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
   );
 }
 
-function StepsScreen({ stepLogs, profile, onSave, onDelete }: { stepLogs: StepLog[]; profile: UserProfile; onSave: (entry: StepLog) => Promise<void> | void; onDelete: (id: string) => Promise<void> | void }) {
+function StepsScreen({ stepLogs, profile, onSave, onEdit }: { stepLogs: StepLog[]; profile: UserProfile; onSave: (entry: StepLog) => Promise<void> | void; onEdit: (entry: StepLog) => void }) {
   const [manualSteps, setManualSteps] = useState(0);
   const [saving, setSaving] = useState(false);
   const counter = useStepCounter();
@@ -1009,6 +1057,7 @@ function StepsScreen({ stepLogs, profile, onSave, onDelete }: { stepLogs: StepLo
     if (!steps || steps < 1) return;
     setSaving(true);
     await onSave({
+      kind: "steps",
       id: makeId("steps"),
       title: source === "motion" ? "Motion step session" : "Manual step entry",
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -1049,24 +1098,45 @@ function StepsScreen({ stepLogs, profile, onSave, onDelete }: { stepLogs: StepLo
         <button type="button" className="primary-button full" onClick={() => saveSteps("manual")} disabled={saving || manualSteps < 1}>{saving ? <Loader2 className="spin" size={17} /> : <Check size={17} />}Save steps</button>
       </section>
 
-      {stepLogs.length > 0 && <section><div className="section-title"><h3>Recent steps</h3><span>{stepLogs.length}</span></div><div className="log-list">{stepLogs.slice(0, 10).map((log) => <StepLogCard key={log.id} entry={log} onDelete={onDelete} />)}</div></section>}
+      {stepLogs.length > 0 && <section><div className="section-title"><h3>Recent steps</h3><span>{stepLogs.length}</span></div><div className="log-list">{stepLogs.slice(0, 10).map((log) => <StepLogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>}
     </div>
   );
 }
 
-function ExpenseScreen({ expenses, onSave, onEdit }: { expenses: ExpenseLog[]; onSave: (entry: LogEntry) => void; onEdit: (entry: LogEntry) => void }) {
+function ExpenseScreen({ expenses, budget, onBudgetSave, onSave, onEdit }: { expenses: ExpenseLog[]; budget: ExpenseBudgetSettings; onBudgetSave: (settings: ExpenseBudgetSettings) => Promise<void> | void; onSave: (entry: LogEntry) => void; onEdit: (entry: LogEntry) => void }) {
   const [input, setInput] = useState("");
   const [period, setPeriod] = useState<"day" | "week" | "month">("day");
   const [draft, setDraft] = useState<ExpenseLog | null>(null);
+  const [budgetDraft, setBudgetDraft] = useState(budget);
   const [analyzing, setAnalyzing] = useState(false);
   const [provider, setProvider] = useState("");
   const speech = useSpeechInput((value) => setInput((current) => `${current} ${value}`.trim()));
   const visibleExpenses = expenses.filter((expense) => isWithinPeriod(expense.date, period));
   const total = visibleExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const budgetSnapshot = getExpenseBudgetSnapshot(expenses, budget);
+  const warning = budgetSnapshot.level && !budget.dismissedWarnings.includes(warningKey(budgetSnapshot.currentMonth, budgetSnapshot.level)) ? budgetSnapshot.level : null;
   const categories = visibleExpenses.reduce<Record<string, number>>((result, expense) => {
     result[expense.category] = (result[expense.category] ?? 0) + expense.amount;
     return result;
   }, {});
+
+  useEffect(() => {
+    setBudgetDraft(budget);
+  }, [budget]);
+
+  function dismissWarning(level: ExpenseWarningLevel) {
+    const key = warningKey(budgetSnapshot.currentMonth, level);
+    void onBudgetSave({ ...budget, dismissedWarnings: budget.dismissedWarnings.includes(key) ? budget.dismissedWarnings : [...budget.dismissedWarnings, key] });
+  }
+
+  async function saveBudget() {
+    const changedMonthLimit = budgetDraft.monthlyLimit !== budget.monthlyLimit;
+    await onBudgetSave({
+      enabled: budgetDraft.enabled,
+      monthlyLimit: Math.max(0, Number(budgetDraft.monthlyLimit) || 0),
+      dismissedWarnings: changedMonthLimit ? [] : budget.dismissedWarnings
+    });
+  }
 
   async function analyze() {
     setAnalyzing(true);
@@ -1078,7 +1148,47 @@ function ExpenseScreen({ expenses, onSave, onEdit }: { expenses: ExpenseLog[]; o
     setAnalyzing(false);
   }
 
-  return <div className="stack"><section className="expense-summary"><div><p className="eyebrow">{period} spending</p><strong>{visibleExpenses[0]?.currency ?? "INR"} {total.toLocaleString()}</strong><span>{visibleExpenses.length} expenses logged</span></div><div className="period-toggle">{(["day", "week", "month"] as const).map((item) => <button type="button" key={item} className={period === item ? "active" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div></section><section className="input-card"><div className="input-heading"><label htmlFor="expense-input">Add expense</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="expense-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: paid Rs 420 for groceries at Reliance..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze expense"}</button></section>{Object.keys(categories).length > 0 && <section className="category-list"><div className="section-title"><h3>Categories</h3><span>{period}</span></div>{Object.entries(categories).map(([category, amount]) => <div className="category-row" key={category}><span>{labelFromValue(category)}</span><b>{visibleExpenses[0]?.currency ?? "INR"} {amount.toLocaleString()}</b></div>)}</section>}{visibleExpenses.length > 0 && <section><div className="section-title"><h3>Recent expenses</h3><span>{visibleExpenses.length}</span></div><div className="log-list">{visibleExpenses.slice(0, 8).map((expense) => <LogCard key={expense.id} entry={expense} onEdit={onEdit} />)}</div></section>}{draft && <ReviewExpense draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); }} />}</div>;
+  return (
+    <div className="stack">
+      <section className="expense-summary">
+        <div>
+          <p className="eyebrow">{period} spending</p>
+          <strong>{visibleExpenses[0]?.currency ?? "INR"} {total.toLocaleString()}</strong>
+          <span>{visibleExpenses.length} expenses logged</span>
+        </div>
+        <div className="period-toggle">{(["day", "week", "month"] as const).map((item) => <button type="button" key={item} className={period === item ? "active" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div>
+      </section>
+
+      <section className="budget-card">
+        <div className="section-title"><h3>Monthly budget</h3><span>{budget.enabled ? "On" : "Off"}</span></div>
+        <label className="toggle-row"><input type="checkbox" checked={budgetDraft.enabled} onChange={(event) => setBudgetDraft({ ...budgetDraft, enabled: event.target.checked })} /><span>Budget alerts</span></label>
+        <NumberField label="Monthly limit" value={budgetDraft.monthlyLimit} step={100} onChange={(monthlyLimit) => setBudgetDraft({ ...budgetDraft, monthlyLimit })} />
+        <div className="budget-meter">
+          <div><b>{Math.max(0, budgetSnapshot.remaining).toLocaleString()}</b><span>left this month</span></div>
+          <div><b>{budgetSnapshot.currentSpent.toLocaleString()}</b><span>spent</span></div>
+        </div>
+        <div className="budget-progress"><span style={{ width: `${Math.min(100, Math.max(0, budgetSnapshot.effectiveLimit ? (budgetSnapshot.currentSpent / budgetSnapshot.effectiveLimit) * 100 : 0))}%` }} /></div>
+        {budgetSnapshot.carriedOver > 0 && <p className="support-note">INR {budgetSnapshot.carriedOver.toLocaleString()} over budget from {monthLabel(budgetSnapshot.priorMonth)} is deducted from this month.</p>}
+        <button type="button" className="secondary-button full" onClick={saveBudget}><Check size={17} /> Save budget</button>
+      </section>
+
+      {warning && <section className={`warning-card ${warning === "over" ? "critical" : ""}`}>
+        <div>
+          <p className="eyebrow">{warning === "over" ? "Critical budget" : "Budget warning"}</p>
+          <h3>{warning === "over" ? "You are over budget" : `${warning}% budget left`}</h3>
+          <p>{warning === "over" ? `INR ${Math.abs(budgetSnapshot.remaining).toLocaleString()} will come out of next month's limit.` : `Only INR ${Math.max(0, budgetSnapshot.remaining).toLocaleString()} remains for ${monthLabel(budgetSnapshot.currentMonth)}.`}</p>
+        </div>
+        <button type="button" className="icon-chip" onClick={() => dismissWarning(warning)} aria-label="Dismiss warning"><Check size={16} /></button>
+      </section>}
+
+      <ExpenseCalendar expenses={expenses} />
+
+      <section className="input-card"><div className="input-heading"><label htmlFor="expense-input">Add expense</label><button type="button" className={speech.listening ? "icon-chip active" : "icon-chip"} onClick={speech.toggle} aria-label="Use microphone"><Mic size={16} /></button></div><textarea id="expense-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Example: paid Rs 420 for groceries at Reliance..." /><button type="button" className="primary-button full" onClick={analyze} disabled={analyzing}>{analyzing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{analyzing ? "Analyzing" : "Analyze expense"}</button></section>
+      {Object.keys(categories).length > 0 && <section className="category-list"><div className="section-title"><h3>Categories</h3><span>{period}</span></div>{Object.entries(categories).map(([category, amount]) => <div className="category-row" key={category}><span>{labelFromValue(category)}</span><b>{visibleExpenses[0]?.currency ?? "INR"} {amount.toLocaleString()}</b></div>)}</section>}
+      {visibleExpenses.length > 0 && <section><div className="section-title"><h3>Recent expenses</h3><span>{visibleExpenses.length}</span></div><div className="log-list">{visibleExpenses.slice(0, 8).map((expense) => <LogCard key={expense.id} entry={expense} onEdit={onEdit} />)}</div></section>}
+      {draft && <ReviewExpense draft={draft} provider={provider} onChange={setDraft} onSave={() => { onSave(draft); setDraft(null); setInput(""); }} />}
+    </div>
+  );
 }
 
 function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: LogEntry) => void }) {
@@ -1086,7 +1196,65 @@ function HistoryScreen({ logs, onEdit }: { logs: LogEntry[]; onEdit: (entry: Log
     result[log.date] = result[log.date] ? [...result[log.date], log] : [log];
     return result;
   }, {});
-  return <div className="stack">{Object.entries(grouped).map(([date, entries]) => <section key={date} className="history-day"><div className="section-title"><h3>{date === today ? "Today" : date}</h3><span>{entries.length} logs</span></div><div className="log-list">{entries.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>)}</div>;
+  return <div className="stack"><ActivityCalendar logs={logs} />{Object.entries(grouped).map(([date, entries]) => <section key={date} className="history-day"><div className="section-title"><h3>{date === today ? "Today" : date}</h3><span>{entries.length} logs</span></div><div className="log-list">{entries.map((log) => <LogCard key={log.id} entry={log} onEdit={onEdit} />)}</div></section>)}</div>;
+}
+
+function ActivityCalendar({ logs }: { logs: LogEntry[] }) {
+  const monthKey = monthKeyFromDate();
+  const days = getMonthGrid(monthKey);
+  const monthLogs = logs.filter((log) => dateBelongsToMonth(log.date, monthKey));
+  const completeDays = new Set<string>();
+  const partialDays = new Set<string>();
+  days.forEach((date) => {
+    if (!date) return;
+    const dayLogs = monthLogs.filter((log) => log.date === date);
+    const hasMeal = dayLogs.some((log) => log.kind === "food");
+    const hasWorkout = dayLogs.some((log) => log.kind === "workout");
+    if (hasMeal && hasWorkout) completeDays.add(date);
+    else if (hasMeal || hasWorkout) partialDays.add(date);
+  });
+
+  return (
+    <section className="calendar-card">
+      <div className="section-title"><h3>On-track calendar</h3><span>{monthLabel(monthKey)}</span></div>
+      <div className="calendar-weekdays">{["S", "M", "T", "W", "T", "F", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div>
+      <div className="calendar-grid">
+        {days.map((date, index) => {
+          if (!date) return <span key={`blank-${index}`} className="calendar-day empty" />;
+          const isFuture = date > today;
+          const className = completeDays.has(date) ? "complete" : partialDays.has(date) ? "partial" : isFuture ? "future" : "missed";
+          return <span key={date} className={`calendar-day ${className}`} title={date}>{completeDays.has(date) || partialDays.has(date) ? <Check size={13} /> : isFuture ? <span className="calendar-date">{Number(date.slice(-2))}</span> : <X size={13} />}</span>;
+        })}
+      </div>
+      <div className="calendar-legend"><span><b className="complete" />Meal + workout</span><span><b className="partial" />One logged</span><span><b className="missed" />Missed</span></div>
+    </section>
+  );
+}
+
+function ExpenseCalendar({ expenses }: { expenses: ExpenseLog[] }) {
+  const monthKey = monthKeyFromDate();
+  const days = getMonthGrid(monthKey);
+  const spentByDate = expenses.filter((expense) => dateBelongsToMonth(expense.date, monthKey)).reduce<Record<string, number>>((result, expense) => {
+    result[expense.date] = (result[expense.date] ?? 0) + expense.amount;
+    return result;
+  }, {});
+
+  return (
+    <section className="calendar-card">
+      <div className="section-title"><h3>Spending calendar</h3><span>{monthLabel(monthKey)}</span></div>
+      <div className="calendar-weekdays">{["S", "M", "T", "W", "T", "F", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div>
+      <div className="calendar-grid">
+        {days.map((date, index) => {
+          if (!date) return <span key={`blank-${index}`} className="calendar-day empty" />;
+          const isFuture = date > today;
+          const spent = spentByDate[date] ?? 0;
+          const className = spent > 0 ? "spent" : isFuture ? "future" : "missed";
+          return <span key={date} className={`calendar-day ${className}`} title={spent > 0 ? `${date}: INR ${spent.toLocaleString()}` : date}>{spent > 0 ? <Check size={13} /> : isFuture ? <span className="calendar-date">{Number(date.slice(-2))}</span> : <X size={13} />}</span>;
+        })}
+      </div>
+      <div className="calendar-legend"><span><b className="spent" />Spent</span><span><b className="missed" />No spend logged</span></div>
+    </section>
+  );
 }
 
 function ProfileSetupScreen({ email, profile, onSave }: { email?: string | null; profile: UserProfile; onSave: (profile: UserProfile, avatarFile?: File) => Promise<void> | void }) {
@@ -1143,9 +1311,52 @@ function ReviewExpense({ draft, provider, onChange, onSave }: { draft: ExpenseLo
   return <section className="review-card"><div className="section-title"><h3>AI expense draft</h3><span>{provider || draft.confidence}</span></div><EditableText label="Expense" value={draft.title} onChange={(title) => onChange({ ...draft, title })} /><div className="nutrition-grid"><NumberField label="Amount" value={draft.amount} step={0.01} onChange={(amount) => onChange({ ...draft, amount })} /><EditableText label="Currency" value={draft.currency} onChange={(currency) => onChange({ ...draft, currency })} /></div><SelectField label="Category" value={draft.category} options={expenseCategoryOptions} onChange={(category) => onChange({ ...draft, category })} /><EditableText label="Merchant" value={draft.merchant} onChange={(merchant) => onChange({ ...draft, merchant })} />{draft.notes && <p className="support-note">{draft.notes}</p>}<button type="button" className="primary-button full" onClick={onSave}><Check size={17} /> Save expense</button></section>;
 }
 
-function EditSheet({ entry, onClose, onSave, onDelete }: { entry: LogEntry; onClose: () => void; onSave: (entry: LogEntry) => void; onDelete: (id: string) => void }) {
+function EditSheet({ entry, onClose, onSave, onDelete }: { entry: EditableLogEntry; onClose: () => void; onSave: (entry: EditableLogEntry) => void; onDelete: (id: string) => void }) {
   const [draft, setDraft] = useState(entry);
-  return <div className="modal-backdrop"><form className="edit-sheet" onSubmit={(event: FormEvent) => { event.preventDefault(); onSave(draft); }}><div className="sheet-header"><h3>Edit log</h3><button type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><EditableText label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title } as LogEntry)} />{draft.kind === "food" && <><div className="nutrition-grid"><NumberField label="Calories" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /><NumberField label="Protein" value={draft.protein} onChange={(protein) => setDraft({ ...draft, protein })} /><NumberField label="Carbs" value={draft.carbs} onChange={(carbs) => setDraft({ ...draft, carbs })} /><NumberField label="Fat" value={draft.fat} onChange={(fat) => setDraft({ ...draft, fat })} /></div><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /></>}{draft.kind === "workout" && <><div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => setDraft({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /></div><EditableText label="Effort" value={draft.effort} onChange={(effort) => setDraft({ ...draft, effort })} /><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /></>}{draft.kind === "expense" && <><div className="nutrition-grid"><NumberField label="Amount" value={draft.amount} step={0.01} onChange={(amount) => setDraft({ ...draft, amount })} /><EditableText label="Currency" value={draft.currency} onChange={(currency) => setDraft({ ...draft, currency })} /></div><SelectField label="Category" value={draft.category} options={expenseCategoryOptions} onChange={(category) => setDraft({ ...draft, category })} /><EditableText label="Merchant" value={draft.merchant} onChange={(merchant) => setDraft({ ...draft, merchant })} /></>}<div className="sheet-actions"><button type="button" className="danger-button" onClick={() => onDelete(entry.id)}>Delete</button><button type="submit" className="primary-button">Save changes</button></div></form></div>;
+  return (
+    <div className="modal-backdrop">
+      <form className="edit-sheet" onSubmit={(event: FormEvent) => { event.preventDefault(); onSave(draft); }}>
+        <div className="sheet-header"><h3>Edit log</h3><button type="button" onClick={onClose} aria-label="Close"><X size={18} /></button></div>
+        <EditableText label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title })} />
+        <div className="nutrition-grid">
+          <DateField label="Date" value={draft.date} onChange={(date) => setDraft({ ...draft, date })} />
+          <TimeField label="Time" value={timeInputFromLabel(draft.time)} onChange={(time) => setDraft({ ...draft, time: timeLabelFromInput(time) })} />
+        </div>
+
+        {draft.kind === "food" && <>
+          <div className="nutrition-grid"><NumberField label="Calories" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /><NumberField label="Protein" value={draft.protein} onChange={(protein) => setDraft({ ...draft, protein })} /><NumberField label="Carbs" value={draft.carbs} onChange={(carbs) => setDraft({ ...draft, carbs })} /><NumberField label="Fat" value={draft.fat} onChange={(fat) => setDraft({ ...draft, fat })} /></div>
+          <div className="nutrition-grid"><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /><EditableText label="Confidence" value={draft.confidence} onChange={(confidence) => setDraft({ ...draft, confidence })} /></div>
+          <SelectField label="Source" value={draft.source} options={[["photo", "Photo"], ["voice", "Voice"], ["text", "Text"]]} onChange={(source) => setDraft({ ...draft, source: source as SourceMode })} />
+          <TextAreaField label="Notes" value={draft.notes ?? ""} onChange={(notes) => setDraft({ ...draft, notes })} />
+        </>}
+
+        {draft.kind === "workout" && <>
+          <div className="nutrition-grid"><NumberField label="Duration" value={draft.duration} onChange={(duration) => setDraft({ ...draft, duration })} /><NumberField label="Burn" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} /></div>
+          <div className="nutrition-grid"><EditableText label="Effort" value={draft.effort} onChange={(effort) => setDraft({ ...draft, effort })} /><NumberField label="Score" value={draft.score} step={0.1} onChange={(score) => setDraft({ ...draft, score })} /></div>
+          <EditableText label="Movements" value={draft.movements.join(", ")} onChange={(movements) => setDraft({ ...draft, movements: movements.split(",").map((movement) => movement.trim()).filter(Boolean) })} />
+          <SelectField label="Source" value={draft.source} options={[["voice", "Voice"], ["text", "Text"]]} onChange={(source) => setDraft({ ...draft, source: source as "voice" | "text" })} />
+          <TextAreaField label="Notes" value={draft.notes ?? ""} onChange={(notes) => setDraft({ ...draft, notes })} />
+        </>}
+
+        {draft.kind === "expense" && <>
+          <div className="nutrition-grid"><NumberField label="Amount" value={draft.amount} step={0.01} onChange={(amount) => setDraft({ ...draft, amount })} /><EditableText label="Currency" value={draft.currency} onChange={(currency) => setDraft({ ...draft, currency })} /></div>
+          <SelectField label="Category" value={draft.category} options={expenseCategoryOptions} onChange={(category) => setDraft({ ...draft, category })} />
+          <EditableText label="Merchant" value={draft.merchant} onChange={(merchant) => setDraft({ ...draft, merchant })} />
+          <SelectField label="Source" value={draft.source} options={[["voice", "Voice"], ["text", "Text"]]} onChange={(source) => setDraft({ ...draft, source: source as "voice" | "text" })} />
+          <EditableText label="Confidence" value={draft.confidence} onChange={(confidence) => setDraft({ ...draft, confidence })} />
+          <TextAreaField label="Notes" value={draft.notes ?? ""} onChange={(notes) => setDraft({ ...draft, notes })} />
+        </>}
+
+        {draft.kind === "steps" && <>
+          <div className="nutrition-grid"><NumberField label="Steps" value={draft.steps} onChange={(steps) => setDraft({ ...draft, steps })} /><NumberField label="Distance km" value={draft.distanceKm} step={0.01} onChange={(distanceKm) => setDraft({ ...draft, distanceKm })} /></div>
+          <NumberField label="Calories" value={draft.calories} onChange={(calories) => setDraft({ ...draft, calories })} />
+          <SelectField label="Source" value={draft.source} options={[["motion", "Motion"], ["manual", "Manual"]]} onChange={(source) => setDraft({ ...draft, source: source as "motion" | "manual" })} />
+        </>}
+
+        <div className="sheet-actions"><button type="button" className="danger-button" onClick={() => onDelete(entry.id)}>Delete</button><button type="submit" className="primary-button">Save changes</button></div>
+      </form>
+    </div>
+  );
 }
 
 function LogCard({ entry, onEdit }: { entry: LogEntry; onEdit: (entry: LogEntry) => void }) {
@@ -1158,13 +1369,13 @@ function LogCard({ entry, onEdit }: { entry: LogEntry; onEdit: (entry: LogEntry)
   return <article className={hasPhoto ? "log-card with-photo" : "log-card"}>{hasPhoto ? <img className="meal-thumb" src={entry.imageUrl} alt={`${entry.title} ${entry.kind}`} /> : <div className={`log-icon ${iconClass}`}>{isFood ? <Utensils size={16} /> : isExpense ? <Wallet size={16} /> : <Dumbbell size={16} />}</div>}<div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{meta}</span></div><h4>{entry.title}</h4><p>{detail}</p></div><button type="button" className="edit-button" onClick={() => onEdit(entry)} aria-label={`Edit ${entry.title}`}><Pencil size={15} /></button></article>;
 }
 
-function StepLogCard({ entry, onDelete }: { entry: StepLog; onDelete: (id: string) => Promise<void> | void }) {
-  return <article className="log-card"><div className="log-icon steps"><Footprints size={16} /></div><div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{entry.source}</span></div><h4>{entry.title}</h4><p>{entry.steps.toLocaleString()} steps - {entry.distanceKm.toFixed(2)} km - {entry.calories} kcal</p></div><button type="button" className="edit-button" onClick={() => onDelete(entry.id)} aria-label={`Delete ${entry.title}`}><X size={15} /></button></article>;
+function StepLogCard({ entry, onEdit }: { entry: StepLog; onEdit: (entry: StepLog) => void }) {
+  return <article className="log-card"><div className="log-icon steps"><Footprints size={16} /></div><div className="log-copy"><div className="log-topline"><span>{entry.time}</span><span>{entry.source}</span></div><h4>{entry.title}</h4><p>{entry.steps.toLocaleString()} steps - {entry.distanceKm.toFixed(2)} km - {entry.calories} kcal</p></div><button type="button" className="edit-button" onClick={() => onEdit(entry)} aria-label={`Edit ${entry.title}`}><Pencil size={15} /></button></article>;
 }
 
-function BottomNav({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {
+function BottomNav({ active, hidden, onChange }: { active: Tab; hidden: boolean; onChange: (tab: Tab) => void }) {
   const items: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [{ key: "home", label: "Home", icon: <Home size={16} /> }, { key: "food", label: "Food", icon: <Utensils size={16} /> }, { key: "workout", label: "Workout", icon: <Dumbbell size={16} /> }, { key: "steps", label: "Steps", icon: <Footprints size={16} /> }, { key: "expenses", label: "Spend", icon: <Wallet size={16} /> }, { key: "history", label: "History", icon: <BarChart3 size={16} /> }, { key: "profile", label: "Profile", icon: <User size={16} /> }];
-  return <nav className="bottom-nav">{items.map((item) => <button type="button" key={item.key} className={active === item.key ? "active" : ""} onClick={() => onChange(item.key)}>{item.icon}<span>{item.label}</span></button>)}</nav>;
+  return <nav className={hidden ? "bottom-nav hidden" : "bottom-nav"}>{items.map((item) => <button type="button" key={item.key} className={active === item.key ? "active" : ""} onClick={() => onChange(item.key)}>{item.icon}<span>{item.label}</span></button>)}</nav>;
 }
 
 function Metric({ label, value, tone }: { label: string; value: string | number; tone: "green" | "gold" }) {
@@ -1182,6 +1393,18 @@ function NumberField({ label, value, onChange, step = 1 }: { label: string; valu
 
 function EditableText({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return <label className="field"><span>{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} /></label>;
+}
+
+function TextAreaField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return <label className="field"><span>{label}</span><textarea value={value} onChange={(event) => onChange(event.target.value)} /></label>;
+}
+
+function DateField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return <label className="field"><span>{label}</span><input type="date" value={value} onChange={(event) => onChange(event.target.value)} /></label>;
+}
+
+function TimeField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return <label className="field"><span>{label}</span><input type="time" value={value} onChange={(event) => onChange(event.target.value)} /></label>;
 }
 
 function SelectField({ label, value, options, onChange }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
