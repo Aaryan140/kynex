@@ -38,7 +38,6 @@ type GeminiAnalysisResult<T> = {
   analysis: T;
   provider: string;
   error?: string;
-  detail?: string;
 };
 
 export async function callGeminiAnalysis<T>(
@@ -65,11 +64,11 @@ export async function callGeminiAnalysis<T>(
 
   if (!response.ok) {
     const detail = await response.text();
+    console.error(`${options.errorLabel} failed:`, response.status, detail);
     return {
       analysis: options.mockFn(),
       provider: "mock-fallback",
-      error: `${options.errorLabel} failed`,
-      detail
+      error: "AI analysis temporarily unavailable"
     };
   }
 
