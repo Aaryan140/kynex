@@ -15,10 +15,18 @@ create table if not exists public.profiles (
   protein_target_g integer,
   carbs_target_g integer,
   fat_target_g integer,
+  expense_budget_enabled boolean not null default false,
+  monthly_expense_budget numeric not null default 0,
+  expense_budget_dismissed_warnings text[] not null default '{}',
   profile_completed_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.profiles
+  add column if not exists expense_budget_enabled boolean not null default false,
+  add column if not exists monthly_expense_budget numeric not null default 0,
+  add column if not exists expense_budget_dismissed_warnings text[] not null default '{}';
 
 create table if not exists public.food_logs (
   id uuid primary key default gen_random_uuid(),
