@@ -1,4 +1,5 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { hasAuthenticatedUser, numberValue, objectValue, parseJsonOrFallback, readJsonBody, textValue } from "../_shared";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -26,75 +27,82 @@ function mockWorkoutAnalysis(prompt: string): WorkoutAnalysis {
   };
 }
 
-function parseJson(text: string): WorkoutAnalysis {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(cleaned) as WorkoutAnalysis;
-}
-
 export async function POST(request: NextRequest) {
-  const { prompt = "", bodyWeightKg = 78, profile = {} } = await request.json();
+  const body = await readJsonBody(request);
+  const prompt = textValue(body.prompt);
+  const bodyWeightKg = numberValue(body.bodyWeightKg, 78);
+  const profile = objectValue(body.profile);
   const apiKey = process.env.GEMINI_API_KEY;
+  const fallback = mockWorkoutAnalysis(prompt);
 
   if (!apiKey) {
-    return NextResponse.json({ analysis: mockWorkoutAnalysis(prompt), provider: "mock" });
+    return NextResponse.json({ analysis: fallback, provider: "mock" });
   }
 
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text:
-                "Analyze this workout log for a fitness tracker. Return only JSON with title, duration, calories, effort, score, movements, notes. Score is 0-10 for workout quality and recovery impact. Use body weight kg for calorie estimate when useful: " +
-                bodyWeightKg +
-                ". User profile context for personalization: " +
-                JSON.stringify({
-                  age: profile.age,
-                  sex: profile.sex,
-                  heightCm: profile.heightCm,
-                  weightKg: profile.weightKg,
-                  goal: profile.goal,
-                  trainingLevel: profile.trainingLevel,
-                  activityLevel: profile.activityLevel,
-                  dailyCalorieTarget: profile.dailyCalorieTarget,
-                  proteinTarget: profile.proteinTarget,
-                  carbsTarget: profile.carbsTarget,
-                  fatTarget: profile.fatTarget
-                }) +
-                ". Workout text: " +
-                prompt
-            }
-          ]
+  if (!(await hasAuthenticatedUser(request))) {
+    return NextResponse.json({ error: "Authentication is required for AI analysis." }, { status: 401 });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text:
+                  "Analyze this workout log for a fitness tracker. Return only JSON with title, duration, calories, effort, score, movements, notes. Score is 0-10 for workout quality and recovery impact. Use body weight kg for calorie estimate when useful: " +
+                  bodyWeightKg +
+                  ". User profile context for personalization: " +
+                  JSON.stringify({
+                    age: profile.age,
+                    sex: profile.sex,
+                    heightCm: profile.heightCm,
+                    weightKg: profile.weightKg,
+                    goal: profile.goal,
+                    trainingLevel: profile.trainingLevel,
+                    activityLevel: profile.activityLevel,
+                    dailyCalorieTarget: profile.dailyCalorieTarget,
+                    proteinTarget: profile.proteinTarget,
+                    carbsTarget: profile.carbsTarget,
+                    fatTarget: profile.fatTarget
+                  }) +
+                  ". Workout text: " +
+                  prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              title: { type: "STRING" },
+              duration: { type: "INTEGER" },
+              calories: { type: "INTEGER" },
+              effort: { type: "STRING" },
+              score: { type: "NUMBER" },
+              movements: { type: "ARRAY", items: { type: "STRING" } },
+              notes: { type: "STRING" }
+            },
+            required: ["title", "duration", "calories", "effort", "score", "movements", "notes"]
+          }
         }
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            duration: { type: "INTEGER" },
-            calories: { type: "INTEGER" },
-            effort: { type: "STRING" },
-            score: { type: "NUMBER" },
-            movements: { type: "ARRAY", items: { type: "STRING" } },
-            notes: { type: "STRING" }
-          },
-          required: ["title", "duration", "calories", "effort", "score", "movements", "notes"]
-        }
-      }
-    })
-  });
+      })
+    });
+  } catch {
+    return NextResponse.json({ error: "Gemini workout analysis unavailable", analysis: fallback, provider: "mock-fallback" });
+  }
 
   if (!response.ok) {
-    const detail = await response.text();
     return NextResponse.json(
-      { error: "Gemini workout analysis failed", detail, analysis: mockWorkoutAnalysis(prompt), provider: "mock-fallback" },
+      { error: "Gemini workout analysis failed", analysis: fallback, provider: "mock-fallback" },
       { status: 200 }
     );
   }
@@ -102,8 +110,8 @@ export async function POST(request: NextRequest) {
   const data = await response.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    return NextResponse.json({ analysis: mockWorkoutAnalysis(prompt), provider: "mock-fallback" });
+    return NextResponse.json({ analysis: fallback, provider: "mock-fallback" });
   }
 
-  return NextResponse.json({ analysis: parseJson(text), provider: "gemini" });
+  return NextResponse.json({ analysis: parseJsonOrFallback(text, fallback), provider: "gemini" });
 }

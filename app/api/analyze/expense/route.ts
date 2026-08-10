@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasAuthenticatedUser, parseJsonOrFallback, readJsonBody, textValue } from "../_shared";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -30,61 +31,66 @@ function mockExpenseAnalysis(prompt: string): ExpenseAnalysis {
   };
 }
 
-function parseJson(text: string): ExpenseAnalysis {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(cleaned) as ExpenseAnalysis;
-}
-
 export async function POST(request: NextRequest) {
-  const { prompt = "" } = await request.json();
+  const body = await readJsonBody(request);
+  const prompt = textValue(body.prompt);
   const apiKey = process.env.GEMINI_API_KEY;
+  const fallback = mockExpenseAnalysis(prompt);
 
   if (!apiKey) {
-    return NextResponse.json({ analysis: mockExpenseAnalysis(prompt), provider: "mock" });
+    return NextResponse.json({ analysis: fallback, provider: "mock" });
   }
 
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text:
-                "Analyze this expense log for a personal expense tracker in India. Return only JSON with title, amount, currency, category, merchant, confidence, notes. Use INR unless the user explicitly names another currency or uses a currency symbol like $. Category must be one of: " +
-                categories.join(", ") +
-                ". If the category is unclear, use miscellaneous. If amount is unclear, use 0 and explain in notes. Expense text: " +
-                prompt
-            }
-          ]
+  if (!(await hasAuthenticatedUser(request))) {
+    return NextResponse.json({ error: "Authentication is required for AI analysis." }, { status: 401 });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text:
+                  "Analyze this expense log for a personal expense tracker in India. Return only JSON with title, amount, currency, category, merchant, confidence, notes. Use INR unless the user explicitly names another currency or uses a currency symbol like $. Category must be one of: " +
+                  categories.join(", ") +
+                  ". If the category is unclear, use miscellaneous. If amount is unclear, use 0 and explain in notes. Expense text: " +
+                  prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              title: { type: "STRING" },
+              amount: { type: "NUMBER" },
+              currency: { type: "STRING" },
+              category: { type: "STRING" },
+              merchant: { type: "STRING" },
+              confidence: { type: "NUMBER" },
+              notes: { type: "STRING" }
+            },
+            required: ["title", "amount", "currency", "category", "merchant", "confidence", "notes"]
+          }
         }
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.1,
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            amount: { type: "NUMBER" },
-            currency: { type: "STRING" },
-            category: { type: "STRING" },
-            merchant: { type: "STRING" },
-            confidence: { type: "NUMBER" },
-            notes: { type: "STRING" }
-          },
-          required: ["title", "amount", "currency", "category", "merchant", "confidence", "notes"]
-        }
-      }
-    })
-  });
+      })
+    });
+  } catch {
+    return NextResponse.json({ error: "Gemini expense analysis unavailable", analysis: fallback, provider: "mock-fallback" });
+  }
 
   if (!response.ok) {
-    const detail = await response.text();
     return NextResponse.json(
-      { error: "Gemini expense analysis failed", detail, analysis: mockExpenseAnalysis(prompt), provider: "mock-fallback" },
+      { error: "Gemini expense analysis failed", analysis: fallback, provider: "mock-fallback" },
       { status: 200 }
     );
   }
@@ -92,10 +98,10 @@ export async function POST(request: NextRequest) {
   const data = await response.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    return NextResponse.json({ analysis: mockExpenseAnalysis(prompt), provider: "mock-fallback" });
+    return NextResponse.json({ analysis: fallback, provider: "mock-fallback" });
   }
 
-  const analysis = parseJson(text);
+  const analysis = parseJsonOrFallback(text, fallback);
   if (!categories.includes(analysis.category)) analysis.category = "miscellaneous";
   const lowerPrompt = prompt.toLowerCase();
   if (!lowerPrompt.includes("$") && !lowerPrompt.includes("usd") && !lowerPrompt.includes("dollar")) {

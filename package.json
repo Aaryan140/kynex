@@ -6,18 +6,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.87.1",
+    "@supabase/supabase-js": "^2.108.2",
     "lucide-react": "^0.561.0",
-    "next": "^16.0.10",
-    "react": "^19.2.1",
-    "react-dom": "^19.2.1"
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@types/node": "^24.10.1",
-    "@types/react": "^19.2.7",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3"
   }

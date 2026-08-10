@@ -1,4 +1,5 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { hasAuthenticatedUser, imageDataUrlParts, objectValue, parseJsonOrFallback, readJsonBody, textValue } from "../_shared";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -28,17 +29,19 @@ function mockFoodAnalysis(prompt: string): FoodAnalysis {
   };
 }
 
-function parseJson(text: string): FoodAnalysis {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  return JSON.parse(cleaned) as FoodAnalysis;
-}
-
 export async function POST(request: NextRequest) {
-  const { prompt = "", imageDataUrl = "", profile = {} } = await request.json();
+  const body = await readJsonBody(request);
+  const prompt = textValue(body.prompt);
+  const profile = objectValue(body.profile);
   const apiKey = process.env.GEMINI_API_KEY;
+  const fallback = mockFoodAnalysis(prompt);
 
   if (!apiKey) {
-    return NextResponse.json({ analysis: mockFoodAnalysis(prompt), provider: "mock" });
+    return NextResponse.json({ analysis: fallback, provider: "mock" });
+  }
+
+  if (!(await hasAuthenticatedUser(request))) {
+    return NextResponse.json({ error: "Authentication is required for AI analysis." }, { status: 401 });
   }
 
   const parts: Array<Record<string, unknown>> = [
@@ -63,42 +66,45 @@ export async function POST(request: NextRequest) {
     }
   ];
 
-  if (imageDataUrl && typeof imageDataUrl === "string" && imageDataUrl.includes(",")) {
-    const [header, data] = imageDataUrl.split(",");
-    const mimeType = header.match(/data:(.*);base64/)?.[1] || "image/jpeg";
-    parts.push({ inline_data: { mime_type: mimeType, data } });
+  const image = imageDataUrlParts(body.imageDataUrl);
+  if (image) {
+    parts.push({ inline_data: { mime_type: image.mimeType, data: image.data } });
   }
 
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            calories: { type: "INTEGER" },
-            protein: { type: "NUMBER" },
-            carbs: { type: "NUMBER" },
-            fat: { type: "NUMBER" },
-            score: { type: "NUMBER" },
-            confidence: { type: "NUMBER" },
-            notes: { type: "STRING" }
-          },
-          required: ["title", "calories", "protein", "carbs", "fat", "score", "confidence", "notes"]
+  let response: Response;
+  try {
+    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              title: { type: "STRING" },
+              calories: { type: "INTEGER" },
+              protein: { type: "NUMBER" },
+              carbs: { type: "NUMBER" },
+              fat: { type: "NUMBER" },
+              score: { type: "NUMBER" },
+              confidence: { type: "NUMBER" },
+              notes: { type: "STRING" }
+            },
+            required: ["title", "calories", "protein", "carbs", "fat", "score", "confidence", "notes"]
+          }
         }
-      }
-    })
-  });
+      })
+    });
+  } catch {
+    return NextResponse.json({ error: "Gemini food analysis unavailable", analysis: fallback, provider: "mock-fallback" });
+  }
 
   if (!response.ok) {
-    const detail = await response.text();
     return NextResponse.json(
-      { error: "Gemini food analysis failed", detail, analysis: mockFoodAnalysis(prompt), provider: "mock-fallback" },
+      { error: "Gemini food analysis failed", analysis: fallback, provider: "mock-fallback" },
       { status: 200 }
     );
   }
@@ -106,8 +112,8 @@ export async function POST(request: NextRequest) {
   const data = await response.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    return NextResponse.json({ analysis: mockFoodAnalysis(prompt), provider: "mock-fallback" });
+    return NextResponse.json({ analysis: fallback, provider: "mock-fallback" });
   }
 
-  return NextResponse.json({ analysis: parseJson(text), provider: "gemini" });
+  return NextResponse.json({ analysis: parseJsonOrFallback(text, fallback), provider: "gemini" });
 }

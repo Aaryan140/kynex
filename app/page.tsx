@@ -149,6 +149,15 @@ declare global {
 
 const today = new Date().toISOString().slice(0, 10);
 const supabase = getSupabaseBrowserClient();
+
+async function analysisHeaders() {
+  const { data } = await supabase?.auth.getSession() ?? { data: { session: null } };
+  const token = data.session?.access_token;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  };
+}
 const defaultExpenseBudget: ExpenseBudgetSettings = {
   enabled: false,
   monthlyLimit: 0,
@@ -569,16 +578,35 @@ export default function KynexApp() {
 
   useEffect(() => {
     if (!supabase) return;
+    const client = supabase;
     let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setAuthReady(true);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data } = client.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setAuthReady(true);
     });
+
+    async function restoreSession() {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          client.auth.getSession(),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error("Timed out restoring session")), 5000);
+          })
+        ]);
+        if (!active) return;
+        setSession(result.data.session);
+      } catch {
+        if (!active) return;
+        setSession(null);
+        setSyncStatus("Could not restore your session. Please sign in again.");
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (active) setAuthReady(true);
+      }
+    }
+
+    void restoreSession();
     return () => {
       active = false;
       data.subscription.unsubscribe();
@@ -1095,7 +1123,7 @@ function FoodScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry:
     setAnalyzing(true);
     let imageDataUrl = "";
     if (imageFile) imageDataUrl = await fileToDataUrl(imageFile);
-    const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
+    const response = await fetch("/api/analyze/food", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
@@ -1131,7 +1159,7 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
 
   async function analyze() {
     setAnalyzing(true);
-    const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
+    const response = await fetch("/api/analyze/workout", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
@@ -1257,7 +1285,7 @@ function ExpenseScreen({ expenses, budget, onBudgetSave, onSave, onEdit }: { exp
 
   async function analyze() {
     setAnalyzing(true);
-    const response = await fetch("/api/analyze/expense", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input }) });
+    const response = await fetch("/api/analyze/expense", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input }) });
     const data = await response.json();
     setProvider(data.provider ?? "ai");
     const analysis = data.analysis;
