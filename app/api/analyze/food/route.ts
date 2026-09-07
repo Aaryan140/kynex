@@ -1,17 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { hasAuthenticatedUser, needsAuthenticatedUser } from "../_shared";
 import { callGeminiAnalysis, serializeProfile } from "../../../../lib/gemini";
 import { FoodAnalysis, mockFoodAnalysis } from "../../../../lib/analyzers/food";
 
 const MAX_PROMPT_LENGTH = 2000;
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB base64 limit
-
-function getSupabaseServerClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key) return null;
-  return createClient(url, key);
-}
 
 const RESPONSE_SCHEMA = {
   type: "OBJECT",
@@ -29,17 +22,8 @@ const RESPONSE_SCHEMA = {
 };
 
 export async function POST(request: NextRequest) {
-  // Auth check: verify the user is authenticated before allowing AI calls
-  const supabase = getSupabaseServerClient();
-  if (supabase) {
-    const authHeader = request.headers.get("authorization");
-    const token = authHeader?.replace("Bearer ", "") ?? request.cookies.get("sb-access-token")?.value;
-    if (token) {
-      const { data: { user } } = await supabase.auth.getUser(token);
-      if (!user) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-      }
-    }
+  if (needsAuthenticatedUser() && !(await hasAuthenticatedUser(request))) {
+    return NextResponse.json({ error: "Sign in is required for AI analysis." }, { status: 401 });
   }
 
   let body: Record<string, unknown>;

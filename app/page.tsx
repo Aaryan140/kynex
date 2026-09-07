@@ -140,6 +140,16 @@ declare global {
 
 const today = new Date().toISOString().slice(0, 10);
 const supabase = getSupabaseBrowserClient();
+
+async function analysisHeaders() {
+  const session = supabase ? await supabase.auth.getSession() : null;
+  const token = session?.data.session?.access_token;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  };
+}
+
 function monthKeyFromDate(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
@@ -470,6 +480,7 @@ export default function KynexApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<UserProfile>(() => defaultProfile());
   const [authReady, setAuthReady] = useState(!supabase);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [navHidden, setNavHidden] = useState(false);
   const [syncStatus, setSyncStatus] = useState(
     supabase ? "Connect Supabase to sync logs." : "Demo mode: add Supabase keys to enable cloud sync."
@@ -482,13 +493,22 @@ export default function KynexApp() {
   useEffect(() => {
     if (!supabase) return;
     let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setAuthReady(true);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 5000));
+    void (async () => {
+      try {
+        const result = await Promise.race([supabase.auth.getSession(), timeout]);
+        if (!active) return;
+        if (result) setSession(result.data.session);
+        else setSyncStatus("Supabase did not respond. Please try again.");
+      } catch {
+        if (active) setSyncStatus("Could not connect to Supabase. Please try again.");
+      } finally {
+        if (active) setAuthReady(true);
+      }
+    })();
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
+      setPasswordRecovery(event === "PASSWORD_RECOVERY");
       setAuthReady(true);
     });
     return () => {
@@ -916,7 +936,7 @@ export default function KynexApp() {
       <section className="phone-frame">
         <Header tab={tab} userEmail={user?.email ?? null} syncStatus={syncStatus} />
         <div className="screen-content" onScroll={handleContentScroll}>
-          {supabase && !user ? <AuthScreen /> : user && !isProfileComplete(profile) ? <ProfileSetupScreen email={user.email} profile={profile} onSave={saveProfile} /> : <>
+          {supabase && passwordRecovery ? <ResetPasswordScreen onComplete={() => setPasswordRecovery(false)} /> : supabase && !user ? <AuthScreen /> : user && !isProfileComplete(profile) ? <ProfileSetupScreen email={user.email} profile={profile} onSave={saveProfile} /> : <>
             {tab === "home" && <HomeScreen caloriesIn={caloriesIn} caloriesOut={caloriesOut} protein={protein} carbs={carbs} fat={fat} score={score} stepsToday={stepsToday} logs={todaysLogs} profile={profile} onEdit={setEditing} onTab={setTab} />}
             {tab === "food" && <FoodScreen profile={profile} onSave={saveLog} />}
             {tab === "workout" && <WorkoutScreen profile={profile} onSave={saveLog} />}
@@ -958,16 +978,46 @@ function AuthScreen() {
     if (!supabase) return;
     setBusy(true);
     setMessage("");
-    const result = mode === "signin" ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password });
-    setBusy(false);
-    if (result.error) { setMessage(result.error.message); return; }
-    setMessage(mode === "signup" ? "Check your email to confirm signup." : "Signed in.");
+    try {
+      const result = mode === "signin" ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password });
+      if (result.error) { setMessage(result.error.message); return; }
+      setMessage(mode === "signup" ? "Check your email to confirm signup." : "Signed in.");
+    } catch {
+      setMessage("Could not reach Supabase. Please try again in a moment.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function googleSignIn() {
     if (!supabase) return;
-    const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
-    if (error) setMessage(error.message);
+    setBusy(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } });
+      if (error) setMessage(error.message);
+    } catch {
+      setMessage("Google sign-in could not start. Check the Supabase Google provider configuration.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendPasswordReset() {
+    if (!supabase || !email) {
+      setMessage("Enter your email address first, then select Forgot password.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+      setMessage(error ? error.message : "If this account exists, a password reset link has been sent.");
+    } catch {
+      setMessage("Could not request a password reset. Please try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -978,11 +1028,45 @@ function AuthScreen() {
       <label className="field"><span>Email</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
       <label className="field"><span>Password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={6} /></label>
       <button className="primary-button full" type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <ShieldCheck size={17} />}{mode === "signin" ? "Sign in" : "Create account"}</button>
-      <button className="secondary-button full" type="button" onClick={googleSignIn}>Continue with Google</button>
+      <button className="secondary-button full" type="button" onClick={googleSignIn} disabled={busy}>Continue with Google</button>
+      {mode === "signin" && <button className="link-button" type="button" onClick={sendPasswordReset} disabled={busy}>Forgot password?</button>}
       <button className="link-button" type="button" onClick={() => setMode(mode === "signin" ? "signup" : "signin")}>{mode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}</button>
       {message && <p className="support-note">{message}</p>}
     </form>
   );
+}
+
+function ResetPasswordScreen({ onComplete }: { onComplete: () => void }) {
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!supabase) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) setMessage(error.message);
+      else {
+        setMessage("Password updated. You are signed in.");
+        onComplete();
+      }
+    } catch {
+      setMessage("Could not update the password. Request a new reset link and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <form className="auth-card" onSubmit={submit}>
+    <p className="eyebrow">Password recovery</p>
+    <h3>Set a new password</h3>
+    <label className="field"><span>New password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8} /></label>
+    <button className="primary-button full" type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <ShieldCheck size={17} />}Update password</button>
+    {message && <p className="support-note">{message}</p>}
+  </form>;
 }
 
 function HomeScreen({ caloriesIn, caloriesOut, protein, carbs, fat, score, stepsToday, logs, profile, onEdit, onTab }: { caloriesIn: number; caloriesOut: number; protein: number; carbs: number; fat: number; score: number; stepsToday: number; logs: LogEntry[]; profile: UserProfile; onEdit: (entry: LogEntry) => void; onTab: (tab: Tab) => void }) {
@@ -1011,7 +1095,7 @@ function FoodScreen({ profile, onSave }: { profile: UserProfile; onSave: (entry:
     try {
       let imageDataUrl = "";
       if (image.imageFile) imageDataUrl = await fileToDataUrl(image.imageFile);
-      const response = await fetch("/api/analyze/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
+      const response = await fetch("/api/analyze/food", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input, imageDataUrl, profile }) });
       const data = await response.json();
       setProvider(data.provider ?? "ai");
       const analysis = data.analysis;
@@ -1046,7 +1130,7 @@ function WorkoutScreen({ profile, onSave }: { profile: UserProfile; onSave: (ent
   async function analyze() {
     setAnalyzing(true);
     try {
-      const response = await fetch("/api/analyze/workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
+      const response = await fetch("/api/analyze/workout", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input, bodyWeightKg: profile.weightKg, profile }) });
       const data = await response.json();
       setProvider(data.provider ?? "ai");
       const analysis = data.analysis;
@@ -1180,7 +1264,7 @@ function ExpenseScreen({ expenses, budget, onBudgetSave, onSave, onEdit }: { exp
   async function analyze() {
     setAnalyzing(true);
     try {
-      const response = await fetch("/api/analyze/expense", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: input }) });
+      const response = await fetch("/api/analyze/expense", { method: "POST", headers: await analysisHeaders(), body: JSON.stringify({ prompt: input }) });
       const data = await response.json();
       setProvider(data.provider ?? "ai");
       const analysis = data.analysis;
